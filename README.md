@@ -1,6 +1,9 @@
 # 16S-rDNA-analysis
 This repository was designed to save the pipeline and scripts of analysis of 16 SrRNA gene datasets.
 
+# Get details from OTU_analysis_pipeline.md
+https://github.com/Neal050617/16S-rDNA-analysis/blob/master/OTU_analysis_pipeline.md
+
 # R 
 R version 3.6.0 (2019-04-26)
 Platform: x86_64-redhat-linux-gnu (64-bit)
