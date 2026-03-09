@@ -1,206 +1,252 @@
-# Part.1 OTU cluster
-
+## Part1. ASV
 ```shell
+mkdir preparation
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library");
+library(readr);library(tidyverse);
+otu <- read_tsv("merged/otu_table.xls") 
+n.otu <- cbind(ID=data.frame(qq="ASV",ww=c(1:nrow(otu))) %>% mutate(ee=paste(qq,ww,sep="")) %>% .[,3],
+               otu %>% rename_at(1,~"name"))
+n.otu[is.na(n.otu)] <- 0
+n.otu[,-2] %>% rename_at(1,~"ASV ID") %>% 
+  write_tsv("preparation/otu_table.xls")
 
-######################################## 01.quality control #######################################################################
+Tax <- read_tsv("merged/taxonomy.tsv")
+Rename <- n.otu[,1:2] %>% write_tsv("ASV.rename")
 
-seqkit stats *_R1.fastq -a -j 20 -T | sed 's/_R1.fastq//g' > seqkit.R1.out.xls
-seqkit stats *_R2.fastq -a -j 20 -T | sed 's/_R2.fastq//g' > seqkit.R2.out.xls
+Rename %>% left_join(Tax,by=c("name"="Feature ID")) %>% 
+  select(-"name") %>% rename_at(1,~"ASV ID") %>% 
+  write_tsv("preparation/rep-seqs-taxonomy.tsv")
 
-mkdir qct
-fastqc *fastq -t 10 -o qct
-multiqc qct/*
+data2 <- sapply(3:ncol(n.otu),function(x) sum(as.numeric(unlist(n.otu[,x]))))
+data3 <- data.frame("ID" = colnames(n.otu)[-c(1:2)], "count" = data2) %>% mutate(rank = rank(count))
+write_tsv(data3 %>% arrange(count), "preparation/p-sampling-sort.xls")
+'
 
-less merge.list | awk '{print"cutadapt --cut -5 -o "$2".cut "$2"\ncutadapt --cut -50 -o "$3".cut "$3""}' > cut.sh
-sh cut.sh
+biom convert -i preparation/otu_table.xls -o 04.feature-table.biom --to-hdf5 --table-type="OTU table"
+qiime tools import --input-path 04.feature-table.biom --type 'FeatureTable[Frequency]' --output-path 04.otu_table.qza --input-format BIOMV210Format
 
-mv *.fastq rawdata/
-rename 's/.cut//g' *
+# 更改代表序列名称：
+cd preparation
+ln -s ../merged/dna-sequences.fasta ./
+less dna-sequences.fasta | paste - - | sed '1i ASVID\tseq' > rep.fa
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library");pacman::p_load(tidyverse,stringr,magrittr);Rename <- read_tsv("../ASV.rename");rep <- read_tsv("rep.fa") %>% mutate(ASVID = map_chr(ASVID,~str_replace_all(.x,">",""))) %>% inner_join(Rename,.,by=c("name"="ASVID")) %>% select(-name) %>% rename_at(1,~"ASVID") %>% mutate(ASVID = map_chr(ASVID,~str_c(">",.x)));write_tsv(rep,"rep.xls")'
+less rep.xls | sed '1d' | sed "s/\r//g" | tr "\t" "\n" > rep-seqs.fasta
+cd ..
 
-python ~/scripts/run_usearch_mergefilter.py -i merge.list -m 16 -r TRUE -l 400
+# 将代表序列转换成qza格式：
+qiime tools import --type 'FeatureData[Sequence]' --input-path preparation/rep-seqs.fasta --output-path 04.rep-seqs.qza
 
-mkdir cutadapt merge filter_fa filter_fq
-mv *_merged.fastq merge
-mv *_filtered.fasta filter_fa
-mv *_filtered.fastq filter_fq
-mv *fastq cutadapt
-mv merge filter_fa filter_fq rawdata cutadapt data
+# 代表序列统计
+qiime feature-table tabulate-seqs --i-data 04.rep-seqs.qza --o-visualization 04.rep-seqs.qzv
 
-cd data/filter_fa
-ln -s ../../merge.list .
-seqstat2excel.pl merge.list > ../../seqstat.xls 
-cd ../../
+# 系统发育树能够服务于后续多样性分析
+qiime phylogeny align-to-tree-mafft-fasttree \
+      --i-sequences 04.rep-seqs.qza \
+      --o-alignment 04.rep-seqs_aligned.qza \
+      --o-masked-alignment 04.rep_seqs_masked.qza \
+      --p-n-threads 20 \
+      --o-tree preparation/unrooted-tree.qza \
+      --o-rooted-tree preparation/rooted-tree.qza
 
-cat seqstat.xls | sed '1d' | awk '{if($2>=100)print$1}' > analysis.list
-cat seqstat.xls | sed '1d' | awk '{if($2<100)print$0}' > not_analysis.list
+qiime tools export --input-path preparation/rooted-tree.qza --output-path preparation # rooted-tree.nwk 
+mv preparation/tree.nwk preparation/rooted-tree.nwk 
+qiime tools export --input-path preparation/unrooted-tree.qza --output-path preparation # unrooted-tree.nwk 
+mv preparation/tree.nwk preparation/unrooted-tree.nwk 
 
-cat analysis.list | awk '{print"ln -s data/filter_fa/"$1"_filtered.fasta ./"}'>ln.sh
-sh ln.sh
-cat *_filtered.fasta >trimed.fasta
-rm *_filtered.fasta
+#########################################################################################
+NOW=`env LANG=en_US.UTF-8 date +%a_%b_%d_%Y-%m-%d_%H_%M_%S`
+PWD=`pwd`
+PWD2=$PWD"/analysis_"$NOW
+mkdir ${PWD2}
+mkdir ${PWD2}/results
+mkdir ${PWD2}/results/OTU_Taxa 
+mkdir ${PWD2}/results/Estimators
+mkdir ${PWD2}/results/Rarefactions
+mkdir ${PWD2}/results/Community
+mkdir ${PWD2}/results/Shannon_rarefac
+mkdir ${PWD2}/results/Rank_abundance
+mkdir ${PWD2}/results/Specaccum
+mkdir ${PWD2}/results/Heatmap
+mkdir ${PWD2}/results/Beta_diversity
+mkdir ${PWD2}/results/Pca
+mkdir ${PWD2}/results/Pcoa
+mkdir ${PWD2}/results/Nmds
+mkdir ${PWD2}/results/Hcluster_tree
+mkdir ${PWD2}/results/Hclust_bar
+mkdir ${PWD2}/results/Picrust2
+mkdir ${PWD2}/results/Tax4Fun2
 
-mothur "#pcr.seqs(fasta=trimed.fasta,oligos=~/scripts/oligo_v3v4.txt,keepprimer=TRUE,pdiffs=2,rdiffs=2,processors=10)"
-sed -i "s/\t\tfpdiffs=.*rpdiffs=.*//g" trimed.pcr.fasta
+mkdir ${PWD2}/process ${PWD2}/process/ASV
 
-############################################## 02.Analysis ######################################################################
-mkdir Analysis_File_Directory
-mkdir Analysis_File_Directory/process
-cat trimed.pcr.fasta|awk -F ";" '{print $1}'|awk '{if(/>/){if(NR!=1){print SEQ "\n"$0;SEQ="";}else{print $0}}else{SEQ=SEQ""$0}}END{print SEQ}' >Analysis_File_Directory/process/meta.fasta
-cd Analysis_File_Directory/process/
-~/mothur/vsearch -derep_prefix meta.fasta -output meta_derepprefix.fasta -sizeout 
-~/mothur/vsearch -sortbysize meta_derepprefix.fasta -output meta_derepprefix_sorted.fasta -minsize 2
-mkdir otu_0.97
-uparse -cluster_otus meta_derepprefix_sorted.fasta -otus otu_0.97/cluster.fasta -otu_radius_pct 3
-cd otu_0.97
-
-source /root/anaconda3/etc/profile.d/conda.sh
-conda activate qiime2
-python ~/scripts/fasta.multi2one.row.py -f cluster.fasta -o rep-seqs.fasta
-qiime tools import --type 'FeatureData[Sequence]' --input-path rep-seqs.fasta --output-path rep-seqs.qza
-qiime feature-classifier classify-sklearn \
-                --i-classifier ~/database/qiime2_database/silva-138-99-nb-classifier.qza  \
-                --i-reads rep-seqs.qza \
-                --o-classification cluster_tax_assignments.qza \
-                --p-n-jobs 20 \
-                --verbose
-qiime tools export --input-path cluster_tax_assignments.qza --output-path assign_taxonomy
-sed '1d' assign_taxonomy/taxonomy.tsv | sed 's/ //g' > assign_taxonomy/cluster_tax_assignments.txt
-source /root/anaconda3/etc/profile.d/conda.sh
-conda deactivate
-
-cat assign_taxonomy/cluster_tax_assignments.txt|awk '{print "OTU"NR"\t"$2"\t"$3;print "OTU"NR"\t"$1>"otu_reps.rename"}'>otu_reps_tax_assignments.txt
-#map reads to otus
-awk 'ARGIND==1{A[$2]=$1}ARGIND==2{if(/>/){s=0;gsub(/>/,"",$1);if(A[$1]){s=1;print ">"A[$1]}}else{if(s==1){print}}}'  otu_reps.rename  cluster.fasta >otu_reps.fasta
-uparse -usearch_global ../meta.fasta -db otu_reps.fasta -strand plus -id 0.97 -uc map.uc
-awk 'ARGIND==1{A[$2]=$1}ARGIND==2{if(/>/){s=0;gsub(/>/,"",$1);if(A[$1]){s=1;print ">"A[$1]"	"$1}}else{if(s==1){print}}}'  otu_reps.rename  cluster.fasta |awk -F ";size" '{print $1}' >otu_reps.fasta
-sed 's/\t/_/' -i otu_reps.fasta
-cat otu_reps.fasta |grep --color '>'|sed 's/>//' |sed 's/^OTU//'|sort -n|sed 's/^/OTU/' >otu_reps.accnos
-choose_seqs.pl -f otu_reps.fasta -l otu_reps.accnos -o otu_reps.sort.fasta 
-mv otu_reps.sort.fasta  otu_reps.fasta
-uc2otuseqids.pl -i map.uc -o otu_seqids.txt 
-cat otu_seqids.txt|awk '{split($0,line,"\t");new=line[1];for(i=2;i<NF+1;i++){match(line[i],/_[^_]+$/);smp=substr(line[i],1,RSTART-1);id=substr(line[i],RSTART+1,RLENGTH);nsmp=smp;gsub(/_/,".",nsmp);new=new"\t"nsmp"_"id;print nsmp"\t"smp;print line[i]"\t"smp >"otus.groups"};print new >"otu_seqids.tmp";}'|sort|uniq >name.check
-make_otu_table.py -i otu_seqids.tmp  -o otu_table.biom
-cat name.check|awk '{gsub(/\./,"\\.",$1);print "sed '\''s/\""$1"\"/\""$2"\"/g'\''      otu_table.biom >otu_table.biom.tmp\nmv otu_table.biom.tmp otu_table.biom";}'>name.check.sh
-sed -i 's/"//g' name.check.sh
-sh name.check.sh
-biom convert -i otu_table.biom -o otu_table.txt  --table-type "OTU table" --to-tsv
-cat otu_table.txt|sed -n '2p'|sed 's/#//' >otu_table.xls.tmp
-cat otu_table.txt|sed -n '3,$p'|sort -V |sed 's/\.0//g'>>otu_table.xls.tmp
-less otu_table.xls.tmp |grep --color 'OTU ID'|sed 's/OTU ID//'|xargs -n1|sort -n|awk '{print $1"\t"$1}'>sample_order
-OTU_table_sortBySam.pl otu_table.xls.tmp sample_order otu_table.xls
+cd ${PWD2}/process/ASV
+\cp $PWD2/../preparation/rep-seqs.fasta ./otu_reps.fasta
+\cp $PWD2/../preparation/otu_table.xls ./
+\cp $PWD2/../preparation/rep-seqs-taxonomy.tsv ./otu_reps_tax_assignments.txt
+\cp $PWD2/../preparation/rooted-tree.nwk ./otu_reps.raw_aligned.fasta.tre
+\cp $PWD2/../preparation/unrooted-tree.nwk ./
 
 ## fix taxonomy
 sed -i 's/ //g' otu_reps_tax_assignments.txt
+sed -i 's/"//g' otu_table.xls
 awk 'NR==FNR{ a[$1] }NR>FNR{ if($1 in a) print $0}' otu_table.xls otu_reps_tax_assignments.txt > otu_select_fix_cluster_tax_assignments.txt
 
-make_otu_table.py -i otu_seqids.tmp -t otu_select_fix_cluster_tax_assignments.txt -o otu_taxa_table.biom 
-cat name.check|awk '{gsub(/\./,"\\.",$1);print "sed '\''s/\""$1"\"/\""$2"\"/g'\''      otu_taxa_table.biom >otu_taxa_table.biom.tmp\nmv otu_taxa_table.biom.tmp otu_taxa_table.biom";}' >name.check.sh
-sed -i 's/"//g' name.check.sh
-sh name.check.sh 
-biom convert -i otu_taxa_table.biom -o otu_taxa_table.txt --header-key taxonomy  --table-type "OTU table" --to-tsv
-cat otu_taxa_table.txt|sed -n '2p'|sed 's/#//' >otu_taxa_table.xls.tmp
-cat otu_taxa_table.txt|sed -n '3,$p'|sort -V|sed 's/\.0//g' >>otu_taxa_table.xls.tmp
-cp sample_order sample_tax_order
-echo -e "taxonomy\ttaxonomy">>sample_tax_order
-OTU_table_sortBySam.pl otu_taxa_table.xls.tmp sample_tax_order otu_taxa_table.xls
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library"); library(tidyverse); taxa <- "otu_select_fix_cluster_tax_assignments.txt" %>% read_tsv(col_names=F) %>% rename_all(~c("ASV ID", "taxonomy" ,"score")) ; table <- "otu_table.xls" %>% read_tsv() %>% left_join(taxa) %>% mutate(taxonomy = map_chr(taxonomy,~replace_na(.x,""))) %>% select(-score) %>% write_tsv("otu_taxa_table.xls") '
 
-/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library"); library(tidyverse);  da <- read_tsv("otu_taxa_table.xls") %>% rename("ASVID" = colnames(.)[1]) %>% select(-taxonomy) %>% gather(ID,value,-ASVID) %>% group_by(ID) %>% summarise_at(vars(c("value")),sum) %>% pull(value) %>% min ; oo <- c(10000,100,8000,125,5000,200,4000,250,2000,500,1000,1000,500,2000,400,2500,200,5000,100,10000) %>% matrix(ncol=2,byrow=T) %>% as_tibble %>% filter(V1 <= da) %>% .[1,] %>% write_tsv("rarefactions_even",col_names=F);'
-####################################### 03.rarefactions_even_depth ###################################################
-multiple_rarefactions_even_depth.py -i otu_table.biom -o rarefied_otu_tables -d `less rarefactions_even | awk '{print$1}'` -n `less rarefactions_even | awk '{print$2}'`
-cd rarefied_otu_tables/
-ls rarefaction_`less ../rarefactions_even | awk '{print$1}'`* | xargs -n `less ../rarefactions_even | awk '{print$2}'` | sed 's/ /,/g' > rare.biom.list
-merge_otu_tables.py -i `cat rare.biom.list` -o ../rarefaction.merged_otu_table.biom 
-cd ../
-biom convert -i rarefaction.merged_otu_table.biom -o rarefaction.merged_otu_table.txt  --table-type "OTU table" --to-tsv
-cat rarefaction.merged_otu_table.txt|sed -n '2p'|sed 's/#//' >rarefaction.merged_otu_table.xls.tmp
-cat rarefaction.merged_otu_table.txt|sed -n '3,$p'|sort -V|sed 's/\.0//g' >>rarefaction.merged_otu_table.xls.tmp
-OTU_table_sortBySam.pl rarefaction.merged_otu_table.xls.tmp sample_order rarefaction.merged_otu_table.xls
+source /root/anaconda3/etc/profile.d/conda.sh
+conda activate qiime1
 
-less rarefaction.merged_otu_table.xls|grep -v 'OTU ID' > rarefaction.merged_otu_table.tmp
-less otu_taxa_table.xls|grep 'OTU ID' > rarefaction.merged_otu_taxa_table.xls
-paste rarefaction.merged_otu_table.tmp otu_select_fix_cluster_tax_assignments.txt|awk '{$(NF-2)="";$(NF)="";print}'|awk -vOFS="\t" '{$1=$1}1' >> rarefaction.merged_otu_taxa_table.xls
-biom convert -i rarefaction.merged_otu_taxa_table.xls -o rarefaction.merged_otu_taxa_table.biom --table-type "OTU table" --process-obs-metadata taxonomy --to-hdf5
-rename 's/rarefaction.merged_otu/rarefac.otu/' rarefaction.merged_otu_*
-vip_taxa_table_format.pl rarefac.otu_taxa_table.xls >rarefac.otu_genus.xls
+biom convert -i otu_table.xls  -o otu_table.biom --table-type "OTU table" --to-hdf5
+less otu_table.xls | grep --color 'ASV ID' | sed 's/ASV ID//' | xargs -n1 | sort -n | awk '{print $1"\t"$1}' > sample_order
 
-################################### 04.Beta Diversity & Rarefaction curves  ###############################################
+#subsample
+less otu_table.xls | awk 'BEGIN{OFS="\t"}{for(i=2;i<=NF;i++)$i=(a[i]+=$i)}END{$1="";print}' | python -c "import sys; print('\n'.join(' '.join(c) for c in zip(*(l.split() for l in sys.stdin.readlines() if l.strip()))))" | sort -n | awk 'NR==1{print}' > subsample.num
 
-less otu_reps.fasta |awk -F '_' '{print $1}' >otu_reps.raw.fasta
-align_seqs.py -i otu_reps.raw.fasta -m muscle -o .
-make_phylogeny.py -i otu_reps.raw_aligned.fasta -o otu_reps_aligned.fasta.tre
-cp /work/scripts/16s/qiime_parameters_97.txt ./
+#判断
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library");library(data.table);library(tidyverse)
+subsample.num <- read_tsv("subsample.num",col_names = F) %>% as.numeric
+if(subsample.num > 10000){
+  print("the lost is more 10000")
+}else{
+  otu_table <- fread("otu_table.xls")
+  #超过10000的要抽
+  otu_table1 <- otu_table %>% select_if(function(x) !is.numeric(x)|(is.numeric(x)&&sum(x)>10000)) %>% fwrite("otu_table1.xls",sep = "\t")
+  #低于10000的保留
+  otu_table2 <- otu_table %>% select_if(function(x) !is.numeric(x)|(is.numeric(x)&&sum(x)<=10000)) %>% fwrite("otu_table2.xls",sep = "\t")
+  print("嗷嗷嗷 最少的比10000小耶")
+}
+'
 
-echo -e "#SampleID\tgroup">map.txt 
-less rarefac.otu_table.xls|grep --color 'OTU ID'|sed 's/OTU ID//'|xargs -n1|sort -n|awk '{print $1"\t"$1}' >>map.txt
-beta_diversity_through_plots.py -i rarefac.otu_table.biom -m map.txt -o beta_diversity -p qiime_parameters_97.txt -t otu_reps_aligned.fasta.tre
+# 将otu_table1.xls的样本单独进行处理
+if [ -f otu_table1.xls ];then
+# 按照超过10000部分的最小值去抽
+less otu_table1.xls | awk 'BEGIN{OFS="\t"}{for(i=2;i<=NF;i++)$i=(a[i]+=$i)}END{$1="";print}' | python -c "import sys; print('\n'.join(' '.join(c) for c in zip(*(l.split() for l in sys.stdin.readlines() if l.strip()))))" | sort -n | awk 'NR==1{print}' > subsample2.num
+biom convert -i otu_table1.xls -o otu_table1.biom --table-type "OTU table"  --to-hdf5
+single_rarefaction.py -i otu_table1.biom -o rarefac.otu_table1.biom -d `less subsample2.num` 
+# 将第一个表转化并将两表合并
+biom convert -i rarefac.otu_table1.biom -o rarefac.otu_table1.txt  --table-type "OTU table" --to-tsv
+# rarefac.otu_table1.xls
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library"); library(tidyverse);library(data.table); bb <- fread("rarefac.otu_table1.txt") %>% rename_at(1,~"OTU ID"); nn <- bb[order(bb$`OTU ID`),]; arrange(nn,nchar(nn$`OTU ID`)) %>% rename_at(1,~"ASV ID") %>% fwrite("rarefac.otu_table1.xls",sep = "\t",scipen = 999)'
 
-################################### 05.Alpha Diversity & Rarefaction curves  ###############################################
-format_list.pl -i  otu_seqids.txt -l 0.97>otus.list
-mothur "#make.shared(list=otus.list,group=otus.groups)"
-rm otus.*.rabund
+# rarefac.otu_table.xls 去掉了合并后行和为0的行
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library"); library(tidyverse);library(data.table);
+rarefac.otu_table1 <- fread("rarefac.otu_table1.xls");rarefac.otu_table2 <- fread("otu_table2.xls")
+rarefac.otu_table <- full_join(rarefac.otu_table1,rarefac.otu_table2);rarefac.otu_table[is.na(rarefac.otu_table)] <- 0
+rarefac.otu_table %>% mutate(sum=apply(rarefac.otu_table[,-1],1,sum)) %>% filter(sum != 0) %>% select(-sum) %>%
+  fwrite("rarefac.otu_table.xls",sep = "\t")
+'
+else
+single_rarefaction.py -i otu_table.biom -o rarefac.otu_table.biom -d `less subsample.num`
+# rarefac.otu_table.xls
+biom convert -i rarefac.otu_table.biom -o rarefac.otu_table.txt  --table-type "OTU table" --to-tsv
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library"); library(tidyverse);library(data.table); bb <- fread("rarefac.otu_table.txt") %>% rename_at(1,~"OTU ID"); nn <- bb[order(bb$`OTU ID`),]; arrange(nn,nchar(nn$`OTU ID`)) %>% rename_at(1,~"ASV ID") %>% fwrite("rarefac.otu_table.xls",sep = "\t",scipen = 999)'
+fi
 
+# rarefac.otu_table.biom
+biom convert -i rarefac.otu_table.xls -o rarefac.otu_table.biom --table-type="OTU table" --to-json
+
+## rarefac.otu_taxa_table.xls
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library");
+library(tidyverse);library(dplyr);library(data.table);
+ASV_tax <- fread("otu_reps_tax_assignments.txt") %>% rename_all(~c("ASV ID","taxonomy","V3"))
+rarefac.otu_table <- fread("rarefac.otu_table.xls") %>% left_join(ASV_tax[,-3]) %>% rename_at(1,~"ASV ID") %>% fwrite("rarefac.otu_taxa_table.xls",sep = "\t")
+'
+
+## rarefac.otu_genus.xls
+biom convert -i rarefac.otu_taxa_table.xls -o rarefac.otu_taxa_table.biom --table-type "OTU table" --process-obs-metadata taxonomy --to-hdf5
+vip_taxa_table_format.pl rarefac.otu_taxa_table.xls > rarefac.otu_genus.xls
+
+summarize_taxa.py -i rarefac.otu_taxa_table.biom -o tax_summary_a -L 1,2,3,4,5,6,7,8 -a
+summarize_taxa.py -i rarefac.otu_taxa_table.biom -o tax_summary_r -L 1,2,3,4,5,6,7,8
+for ((i=1;i<=8;i+=1)){
+       less tax_summary_a/rarefac.otu_taxa_table_L$i.txt|sed 's/Other/Unclassified/g'|grep -v 'Constructed from biom file'|sed 's/#OTU ID/Taxon/' >tax_summary_a/rarefac.otu_taxa_table_L$i.txt.1
+       mv tax_summary_a/rarefac.otu_taxa_table_L$i.txt.1 tax_summary_a/rarefac.otu_taxa_table_L$i.txt
+       less tax_summary_r/rarefac.otu_taxa_table_L$i.txt|sed 's/Other/Unclassified/g' |grep -v 'Constructed from biom file'|sed 's/#OTU ID/Taxon/' >tax_summary_r/rarefac.otu_taxa_table_L$i.txt.1
+       mv tax_summary_r/rarefac.otu_taxa_table_L$i.txt.1 tax_summary_r/rarefac.otu_taxa_table_L$i.txt
+}
+
+levels=("L1" "L2" "L3" "L4" "L5" "L6" "L7" )
+names=("kindom" "phylum" "class" "order" "family" "genus" "species")
+for i in ${!levels[@]}; do
+    level=${levels[$i]}
+    name=${names[$i]}
+sum_tax.pl -i tax_summary_a/rarefac.otu_taxa_table_${level}.txt -o tax_summary_a/${name}.xls.tmp
+OTU_table_sortBySam.pl  tax_summary_a/${name}.xls.tmp sample_order tax_summary_a/${name}.xls
+sum_tax.pl -i tax_summary_r/rarefac.otu_taxa_table_${level}.txt -o tax_summary_r/${name}.percents.xls.tmp
+OTU_table_sortBySam.pl  tax_summary_r/${name}.percents.xls.tmp sample_order tax_summary_r/${name}.percents.xls
+rm tax_summary_a/${name}.xls.tmp
+rm tax_summary_r/${name}.percents.xls.tmp
+done
+
+#less otu_reps.fasta |awk -F '_' '{print $1}' > otu_reps.raw.fasta
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Make_dm.R -i rarefac.otu_table.xls -p otu_reps.raw_aligned.fasta.tre -m none
+
+#### Alpha Diversity & Rarefaction curves  ###############################################
+sum=$(awk '{sum += $2} END {print sum}' rarefac.otu_table.xls)
+if [ "$sum" -eq 1000000 ]; then
+  python /work/users/chaoliu/scripts/otu2shared.py -i otu_table.xls -o otus.shared
+else
+  python /work/users/chaoliu/scripts/otu2shared.py -i rarefac.otu_table.xls -o otus.shared
+fi
 mkdir alpha_rarefac
 cp otus.shared alpha_rarefac/
 cd alpha_rarefac
 mothur "#summary.single(shared=otus.shared,calc=ace-chao-shannon-simpson-coverage,groupmode=f)"
 mothur "#rarefaction.single(shared=otus.shared,calc=sobs-chao-shannon-simpson,groupmode=f,freq=100,processors=30)"
-python ~/scripts/plot_alpha_diversity.py -i rarefaction
-python ~/scripts/plot_alpha_diversity.py -i r_shannon
+
+python /work/users/chaoliu/scripts/plot_alpha_diversity.py -i rarefaction
+python /work/users/chaoliu/scripts/plot_alpha_diversity.py -i r_shannon
+
 shannon-ace-table.pl -d . -o estimators.html
 cd ../
 
-############################################### 06.picrust2 ##################################################################
+#### picrust2 ###################################################
 source /root/anaconda3/etc/profile.d/conda.sh
 conda activate picrust2
-picrust2_pipeline.py -s otu_reps.raw.fasta -i otu_table.biom -o Picrust2 --processes 30 --in_traits COG,EC,KO,PFAM,TIGRFAM
+
+picrust2_pipeline.py -s otu_reps.fasta -i rarefac.otu_table.biom -o Picrust2 --processes 30 --in_traits COG,EC,KO,PFAM,TIGRFAM
 
 cd Picrust2
 find . -name "*.gz" | xargs gunzip
 
-add_descriptions.py -i EC_metagenome_out/pred_metagenome_unstrat.tsv      -m EC      -o EC_metagenome_out/pred_metagenome_unstrat_descrip.tsv
-add_descriptions.py -i KO_metagenome_out/pred_metagenome_unstrat.tsv      -m KO      -o KO_metagenome_out/pred_metagenome_unstrat_descrip.tsv
-add_descriptions.py -i COG_metagenome_out/pred_metagenome_unstrat.tsv     -m COG     -o COG_metagenome_out/pred_metagenome_unstrat_descrip.tsv
-add_descriptions.py -i PFAM_metagenome_out/pred_metagenome_unstrat.tsv    -m PFAM    -o PFAM_metagenome_out/pred_metagenome_unstrat_descrip.tsv
-add_descriptions.py -i TIGRFAM_metagenome_out/pred_metagenome_unstrat.tsv -m TIGRFAM -o TIGRFAM_metagenome_out/pred_metagenome_unstrat_descrip.tsv
-add_descriptions.py -i pathways_out/path_abun_unstrat.tsv                 -m METACYC -o pathways_out/path_abun_unstrat_descrip.tsv
+add_descriptions.py -i EC_metagenome_out/pred_metagenome_unstrat.tsv -m EC  -o EC_metagenome_out/pred_metagenome_unstrat_descrip.tsv
+add_descriptions.py -i KO_metagenome_out/pred_metagenome_unstrat.tsv -m KO  -o KO_metagenome_out/pred_metagenome_unstrat_descrip.tsv            
+add_descriptions.py -i COG_metagenome_out/pred_metagenome_unstrat.tsv -m COG  -o COG_metagenome_out/pred_metagenome_unstrat_descrip.tsv           
+add_descriptions.py -i PFAM_metagenome_out/pred_metagenome_unstrat.tsv -m PFAM  -o PFAM_metagenome_out/pred_metagenome_unstrat_descrip.tsv             
+add_descriptions.py -i TIGRFAM_metagenome_out/pred_metagenome_unstrat.tsv -m TIGRFAM  -o TIGRFAM_metagenome_out/pred_metagenome_unstrat_descrip.tsv             
+add_descriptions.py -i pathways_out/path_abun_unstrat.tsv -m METACYC -o pathways_out/path_abun_unstrat_descrip.tsv
 
+# 生成kegg pathway 丰度表 # https://github.com/picrust/picrust2.git
 pathway_pipeline.py -i KO_metagenome_out/pred_metagenome_unstrat.tsv \
     -o KEGG_pathways_out --no_regroup \
     --map /work/softwares/picrust2-2.3.0-b/picrust2/default_files/pathway_mapfiles/KEGG_pathways_to_KO.tsv
-# æ·»åŠ åŠŸèƒ½æè¿°
+# 添加功能描述
 add_descriptions.py -i KEGG_pathways_out/path_abun_unstrat.tsv.gz \
     --custom_map_table /work/softwares/picrust2-2.3.0-b/picrust2/default_files/description_mapfiles/KEGG_pathways_info.tsv.gz \
     -o KEGG_pathways_out/path_abun_unstrat_descrip.tsv
 
-# ç”Ÿæˆkegg modules ä¸°åº¦è¡¨ # https://github.com/picrust/picrust2.git
+# cp KEGG_modules_info.tsv.gz KEGG_modules_info_377.tsv.gz
+# gunzip KEGG_modules_info_377.tsv.gz
+# gzip KEGG_modules_info_377.tsv
+# 生成kegg modules 丰度表 # https://github.com/picrust/picrust2.git
 pathway_pipeline.py -i KO_metagenome_out/pred_metagenome_unstrat.tsv \
     -o KEGG_modules_out --no_regroup \
     --map /work/softwares/picrust2-2.3.0-b/picrust2/default_files/pathway_mapfiles/KEGG_modules_to_KO.tsv
-# æ·»åŠ åŠŸèƒ½æè¿°
+# 添加功能描述
 add_descriptions.py -i KEGG_modules_out/path_abun_unstrat.tsv.gz \
     --custom_map_table /work/softwares/picrust2-2.3.0-b/picrust2/default_files/description_mapfiles/KEGG_modules_info_377.tsv.gz \
     -o KEGG_modules_out/path_abun_unstrat_descrip.tsv
 
 cd ..
+##### Tax4Fun2 ########################
+source /root/anaconda3/etc/profile.d/conda.sh
+conda deactivate
+/usr/local/R-3.6.0/bin/R -e '.libPaths("/usr/local/R-3.6.0/lib64/R/library");pacman::p_load(tidyverse,stringr,magrittr); library(Tax4Fun2);runRefBlast(path_to_otus = "otu_reps.fasta", path_to_reference_data = "/work/users/chaoliu/database/Tax4Fun2_ReferenceData_v2", path_to_temp_folder = "Tax4Fun2", database_mode = "Ref99NR", use_force = T, num_threads = 30);makeFunctionalPrediction(path_to_otu_table = "otu_table.xls", path_to_reference_data = "/work/users/chaoliu/database/Tax4Fun2_ReferenceData_v2", path_to_temp_folder = "Tax4Fun2", database_mode = "Ref99NR", normalize_by_copy_number = TRUE, min_identity_to_reference = 0.97, normalize_pathways = FALSE)'
 
 ######## collect results  ##########
-## now in Analysis_File_Directory/process/
-cd ../../../
-mkdir Analysis_File_Directory/results
-mkdir Analysis_File_Directory/results/OTU_Taxa 
-mkdir Analysis_File_Directory/results/Estimators
-mkdir Analysis_File_Directory/results/Rarefactions
-mkdir Analysis_File_Directory/results/Community
-mkdir Analysis_File_Directory/results/Shannon_rarefac
-mkdir Analysis_File_Directory/results/Beta_diversity
-mkdir Analysis_File_Directory/results/Picrust2
-
-cd Analysis_File_Directory/process/
-cd  otu_0.97
-cp  tax_summary_a/*.xls tax_summary_a/*.pdf  ../../results/Community/
+## now in analysis_Tue_Dec__1_18_22_16_2020/process/
+cp tax_summary_a/*.xls          ../../results/Community/
 cp tax_summary_r/*.percents.xls ../../results/Community/
-rm  tax_summary_a/*.pdf tax_summary_a/ALL.new.*.xls 
-cp -r otu_table.biom otu_taxa_table.biom otu_table.xls otu_reps.fasta otu_seqids.txt  otu_taxa_table.xls  rarefac.otu_table.biom rarefac.otu_table.xls rarefac.otu_taxa_table.biom rarefac.otu_taxa_table.xls tax_summary_a tax_summary_r rarefac.otu_genus.xls ../../results/OTU_Taxa/
+cp -r otu_table.biom otu_table.xls otu_reps.fasta  otu_taxa_table.xls  rarefac.otu_table.biom rarefac.otu_table.xls rarefac.otu_taxa_table.biom rarefac.otu_taxa_table.xls tax_summary_a tax_summary_r rarefac.otu_genus.xls ../../results/OTU_Taxa/
 
 cd alpha_rarefac/
 cp otus.*.summary estimators.html ../../../results/Estimators
@@ -211,74 +257,611 @@ cp -r otus.*.r_shannon r_shannon.*.pdf ../../../results/Shannon_rarefac/
 rename r_shannon r_shannon.xls ../../../results/Shannon_rarefac/*.r_shannon
 cd ../../
 
-cp otu_0.97/beta_diversity/*.txt ../results/Beta_diversity/
-cp otu_0.97/heatmap.otu.top50.pdf otu_0.97/rarefac.otu_genus.xls ../results/Heatmap/
-cp -r otu_0.97/Picrust2/*_out  ../results/Picrust2/
-
-cd ../../
-
+cp ASV/Beta_diversity/*.txt ../results/Beta_diversity/
+cp -r ASV/Picrust2/*_out ../results/Picrust2/
+cp -r ASV/Tax4Fun2/*_prediction.txt  ../results/Tax4Fun2/
+cd ..
 ```
 
-# Part.2 group analysis
+## Part2.Masslin3
+```R
+library(optparse)
+library(tidyverse)
+#library(Maaslin2)
+#library(Maaslin2, lib.loc = "/work/users/chaoliu/R/x86_64-pc-linux-gnu-library/3.6/")
+library(reshape2)
+library(pheatmap)
+library(cowplot)
+library(data.table)
 
+# 从Bioconductor安装
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("maaslin3")
+library(maaslin3)
+
+if (TRUE) {
+  option_list <- list(
+    make_option(c("-i", "--input"),            type = "character", default = "inner_otu.genus.xls", help = "丰度表格;rarefac.otu_genus.xls"),
+    make_option(c("-s", "--select"),           type = "character", default = "none",                help = "筛选表格:select.txt挑选物种"),
+    make_option(c("-m", "--map"),              type = "character", default = "../map-group.txt",       help = "分组文件:map-group.txt"),
+    make_option(c("-e", "--env"),              type = "character", default = "../age-gender-area-depth.txt",      help = "生理数据:env.txt"),
+    make_option(c("-f", "--unif"),             type = "logical",   default = F,                     help="要不要归一化"),
+    make_option(c("-p", "--per"),              type = "double",    default = 0,                     help="丰度筛选"),
+    make_option(c("-v", "--value"),            type = "double",    default = 0,                   help="核心微生物筛选"),
+    make_option(c("-j", "--pvalue"),           type = "double",    default = 0.05,                  help = "pvalue"),
+    
+    #maaslin3内部参数
+    make_option(c("-o", "--output"),           type = "character", default = "./",                  help = "输出文件夹名"),
+    make_option(c("--formula"),                type = "character", default = "~ age + gender + region + age:gender + age:region",                  help = "输出文件夹名"),
+    #make_option(c("--fixed_effects"),          type = "character", default = c("age", "gender", "region"),   help = "固定效应"),
+    make_option(c("--reference"),              type = "character", default = c("gender,F","region,central"),            help = "对照组 组名+对照组"),
+    make_option(c("--min_abundance"),          type = "double",    default = 0,                  help = "校正后的q值小于"),
+    make_option(c("--min_prevalence"),         type = "double",    default = 0.0001,                  help = "校正后的q值小于"),
+    make_option(c("--zero_threshold"),         type = "double",    default = 0,                  help = "校正后的q值小于"),
+    make_option(c("--min_variance"),           type = "double",    default = 0.1,                  help = "校正后的q值小于"),
+    make_option(c("--max_significance"),       type = "double",    default = 0.1,                  help = "校正后的q值小于"),
+    make_option(c("--normalization"),          type = "character", default = "CLR",                 help = "标准化方法TSS（总求和标准化）, CLR（中心对数比）,NONE（不进行标准化）"),
+    make_option(c("--transform"),              type = "character", default = "NONE",                help = "LOG（base 2）,PLOG,NONE"),
+    make_option(c("--standardize"),            type = "logical",   default = F,                     help = "要不要标准化"),
+    make_option(c("--warn_prevalence"),        type = "logical",   default = F,                     help = "仅丰度分析就是FALSE；真实流行率效应和丰度效应就是TRUE"),
+    make_option(c("--evaluate_only"),          type = "character", default = NULL,           help = "仅评估丰度（abundance）模型还是流行率（prevalence）模型 默认是NULL"),
+    make_option(c("--plot_summary_plot"),      type = "logical",   default = T,                     help = "显著关联汇总图summary_plot.pdf"),
+    make_option(c("--summary_plot_first_n"),   type = "double",    default = 25,                    help = "展示前几个特征"),
+    make_option(c("--coef_plot_vars"),         type = "character", default = NULL,                  help = "NULL或者c('gender M','gender F')"),
+    make_option(c("--heatmap_vars"),           type = "character", default = NULL,                  help = "展不展示热图NULL或者c('gender M','gender F')"),
+    make_option(c("--plot_associations"),      type = "logical",   default = T,                     help = "散点图"),
+    make_option(c("--max_pngs"),               type = "double",    default = 30,                    help = "展示前几个特征的png"),
+    make_option(c("--cores"),                  type = "double",    default = 1,                     help = "使用 4 个核心并行计算"),
+    make_option(c("--summary_plot_balanced"),  type = "logical",   default = F,                     help = "平均分配coef_plot_vars")
+    
+  )
+  opts <- parse_args(OptionParser(option_list = option_list))
+}
+
+############################ Read in #################
+Map <- read_tsv(opts$map) %>%
+  rename_at(c(1), ~"SampleID") %>%
+  mutate(group = fct_inorder(group))
+
+# 行为样本，列为菌群
+#SampleID,Bacteroides,Prevotella,Lactobacillus,Roseburia,Clostridium,Streptococcus
+#S1,1500,200,50,300,0,100
+#S2,3000,50,150,0,400,80
+#S3,1200,300,30,250,100,200
+#S4,800,150,200,100,50,0
+
+genus <- read_tsv(opts$input) %>% 
+  rename_at(1,~"SampleID") %>% 
+  .[,c("SampleID",Map$SampleID)]
+
+
+#genus_longer <- pivot_longer(genus, 
+#             cols = colnames(genus)[-1],  # 明确指定需要转换的列
+#             names_to = "Sample",       # 新列名，用于存储原始列名
+#             values_to = "Value") 
+
+#genus_wider <- pivot_wider(genus_longer, 
+#            id_cols = Sample,       # 保留的列
+#            names_from = SampleID,       # 从"Sample"列获取新列名
+#            values_from = Value)    
+
+#genus <- genus_wider %>% rename_at(1,~"SampleID")
+# Uniform
+if (opts$unif){
+  genus[,2:ncol(genus)] <- sapply(2:ncol(genus),function(x) genus[,x]/sum(genus[,x]))
+}
+
+# 丰度筛选
+if(opts$per != 0){
+  genus <- genus %>% 
+    mutate(SELECT = sapply(1:nrow(.),function(x){
+      any(.[x,2:ncol(.)]>=opts$per)})) %>% 
+    .[.$SELECT,] %>% as_tibble %>% dplyr::select(-SELECT)
+}
+
+
+# 核心微生物筛选
+if(opts$value != 0){
+  otu_coverage <- apply(genus[,2:ncol(genus)],1,function(x) 
+    length(x[x>0])/(ncol(genus)-1))
+  genus <- genus[otu_coverage >= opts$value,]
+}
+
+
+## # 调整ASV名
+## if(opts$input == "../final.CLR.new.otu_taxa_table.xls"){
+##   ASV_name <- fread("../../5.分段年龄性别地区/ASV/inner_otu.genus.xls") %>% .[,1]
+##   rename <- separate(ASV_name, "OTU_tax", into = c("ASV", "Taxonomy"), sep = " ", remove = FALSE) %>% 
+##     select(-Taxonomy) %>% rename_at(2,~"SampleID")
+##   genus0 <- genus
+##   genus <- dplyr::left_join(rename,genus) %>% select(-SampleID) %>% rename_at(1,~"SampleID")
+## }
+
+
+# 物中挑选
+if(opts$select != "none"){
+  ss <- read_tsv(opts$select,col_names = F) %>% rename_at(1,~"SampleID")
+  genus <- inner_join(genus,ss)
+}
+
+Env <- read_tsv(opts$env) %>%
+  rename_at(c(1), ~"SampleID") %>%
+  dplyr::inner_join(., Map) %>% select(-group) %>% rename_at(4,~"region")
+
+
+################################################################################
+# 在Maaslin3中，输入数据的格式要求是：
+# 行 = 样本
+# 列 = 特征（物种）
+
+data1 <- as.matrix(genus[,-1] %>% t)
+colnames(data1) <- genus$SampleID
+
+data2 <- as.data.frame(Env[, -1])
+rownames(data2) <- Env$SampleID
+
+#data2 <- Map
+#rownames(data2) <- Map$SampleID
+#data1 <- data1[,colSums(data1) != 0]
+
+####################### maaslin3 #####################
+set.seed(20190731)
+
+fit_data3 <- maaslin3::maaslin3(
+  input_data = data1,                   # 微生物丰度数据
+  input_metadata = data2,               # 环境因子数据
+  output = opts$output,      # 输出路径
+  #fixed_effects = opts$fixed_effects,              # 固定效应 自变量：年龄分组（分类变量）
+  formula =  opts$formula ,
+  #formula =  ~ age + gender + region + age:gender + age:region ,
+  reference = opts$reference,                     #对照组 不设置就默认第一个
+  min_abundance = opts$min_abundance   ,                 # 经过normalization参数指定的方法处理后的值
+  min_prevalence = opts$min_prevalence   ,                 # 经过normalization参数指定的方法处理后的值
+  zero_threshold = opts$zero_threshold   ,                 # 经过normalization参数指定的方法处理后的值
+  min_variance = opts$min_variance   ,                 # 经过normalization参数指定的方法处理后的值
+  max_significance = opts$max_significance  ,               # 校正后的q值小于等于opts$pvalue 默认0.1
+  #max_significance = 1  ,               # 校正后的q值小于等于opts$pvalue 默认0.1
+  normalization = opts$normalization,                # 标准化方法（推荐 CLR 处理组成性数据）
+  transform = opts$transform,                   # 数据已转换则无需再变换
+  standardize = opts$standardize,                 # 不进行标准化
+  warn_prevalence = opts$warn_prevalence,              # 仅丰度分析就是FALSE；真实流行率效应和丰度效应就是TRUE
+  evaluate_only = opts$evaluate_only,          # 仅评估丰度（“abundance”）模型还是流行率（“prevalence”）模型
+  plot_summary_plot = opts$plot_summary_plot ,               # 显著关联汇总图summary_plot.pdf
+  summary_plot_first_n = opts$summary_plot_first_n,            # 展示前几个特征
+  #coef_plot_vars = opts$coef_plot_vars,       # 每次手动调一下 记得中间有空格
+  #heatmap_vars = opts$heatmap_vars,          # 热图
+  plot_associations = opts$plot_associations           ,     # 画散点图
+  max_pngs = opts$max_pngs                   ,    #排名前max_pngs的会用png展示出来
+  cores = opts$cores,                           # 使用 24 个核心并行计算
+  summary_plot_balanced = opts$summary_plot_balanced         
+)
+
+
+#原始 p 值（pval_individual）未经过多重检验校正，可能高估显著性，因此优先以校正后的qval_individual作为判断标准。
+#常用0.25
+#严格0.05
+#宽松0.5
+#然后再结合coef
+
+#summary_plot_balanced
+#展示coef_plot_vars中每个变量的前 N 个特征，其中 N 等于：ceiling (summary_plot_first_n /length (coef_plot_vars))
+#当分析涉及多个变量（如同时纳入age、genderF、genderM等）时，默认情况下summary_plot_first_n（如 25）会展示所有变量中排名前 25 的特征，可能导致某一变量占据多数展示位置，其他变量被忽略。
+#而summary_plot_balanced = TRUE会让每个变量 “公平分配” 展示名额
+#例如，若summary_plot_first_n = 25且coef_plot_vars包含 3 个变量，则每个变量展示ceiling(25/3) = 9个特征（总展示 27 个，略多于 25），确保每个变量都有足够的特征被呈现。
+#使用前提：
+#必须同时设置coef_plot_vars（指定要展示的变量），否则会报错。例如：
+
+#coef_plot_vars = c("age", "genderF", "genderM"),  # 3个变量
+#summary_plot_first_n = 25,
+#summary_plot_balanced = TRUE  # 每个变量展示9个特征
+
+
+
+#适用场景：
+#适合多变量分析（如同时研究年龄、性别等），希望在汇总图中均衡展示每个变量的重要关联特征，避免某一变量的特征 “垄断” 图表，更全面地呈现不同变量的关联模式。
+
+
+
+
+fit_data3$fit_data_abundance$results %>%
+  as_tibble() %>% # group_by(feature) %>% nest %>%
+  #filter(pval_individual < opts$pvalue) %>%
+  filter(qval_individual < opts$max_significance) %>%
+  pull(feature) %>%
+  unique() %>%
+  as_tibble() %>%
+  write_tsv(str_c(opts$output, "maaslin3.select.list"), col_names = FALSE)
+
+##########################################################################################
+# 找到最长参数的长度
+max_len <- max(sapply(opts, length))
+
+# 每个参数填充至相同长度
+opts_padded <- lapply(opts, function(x) {
+  max_len <- max(sapply(opts, length))  # 按最长参数长度对齐
+  if (length(x) < max_len) c(x, rep(NA, max_len - length(x))) else x
+})
+
+write_tsv(opts_padded %>% as.data.frame() %>% t() %>% as.data.frame() %>% rownames_to_column() %>% as_tibble() %>% mutate(across(everything(), ~replace_na(., ""))),
+          str_c(
+            "Parameter",
+            str_replace_all(as.character(date()), " ", "_") %>% str_replace_all(":", "_"),
+            ".xls"
+          ),
+          col_names = FALSE
+)
+
+```
+## Part3. ANCOM-bc2
+```R
+library(optparse)
+library(tidyverse)
+#library(Maaslin2)
+#library(Maaslin2, lib.loc = "/work/users/chaoliu/R/x86_64-pc-linux-gnu-library/3.6/")
+library(reshape2)
+library(pheatmap)
+library(cowplot)
+library(data.table)
+
+# 从Bioconductor安装
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("maaslin3")
+library(maaslin3)
+
+if (TRUE) {
+  option_list <- list(
+    make_option(c("-i", "--input"),            type = "character", default = "inner_otu.genus.xls", help = "丰度表格;rarefac.otu_genus.xls"),
+    make_option(c("-s", "--select"),           type = "character", default = "none",                help = "筛选表格:select.txt挑选物种"),
+    make_option(c("-m", "--map"),              type = "character", default = "../map-group.txt",       help = "分组文件:map-group.txt"),
+    make_option(c("-e", "--env"),              type = "character", default = "../age-gender-area-depth.txt",      help = "生理数据:env.txt"),
+    make_option(c("-f", "--unif"),             type = "logical",   default = F,                     help="要不要归一化"),
+    make_option(c("-p", "--per"),              type = "double",    default = 0,                     help="丰度筛选"),
+    make_option(c("-v", "--value"),            type = "double",    default = 0,                   help="核心微生物筛选"),
+    make_option(c("-j", "--pvalue"),           type = "double",    default = 0.05,                  help = "pvalue"),
+    
+    #maaslin3内部参数
+    make_option(c("-o", "--output"),           type = "character", default = "./",                  help = "输出文件夹名"),
+    make_option(c("--formula"),                type = "character", default = "~ age + gender + region + age:gender + age:region",                  help = "输出文件夹名"),
+    #make_option(c("--fixed_effects"),          type = "character", default = c("age", "gender", "region"),   help = "固定效应"),
+    make_option(c("--reference"),              type = "character", default = c("gender,F","region,central"),            help = "对照组 组名+对照组"),
+    make_option(c("--min_abundance"),          type = "double",    default = 0,                  help = "校正后的q值小于"),
+    make_option(c("--min_prevalence"),         type = "double",    default = 0.0001,                  help = "校正后的q值小于"),
+    make_option(c("--zero_threshold"),         type = "double",    default = 0,                  help = "校正后的q值小于"),
+    make_option(c("--min_variance"),           type = "double",    default = 0.1,                  help = "校正后的q值小于"),
+    make_option(c("--max_significance"),       type = "double",    default = 0.1,                  help = "校正后的q值小于"),
+    make_option(c("--normalization"),          type = "character", default = "CLR",                 help = "标准化方法TSS（总求和标准化）, CLR（中心对数比）,NONE（不进行标准化）"),
+    make_option(c("--transform"),              type = "character", default = "NONE",                help = "LOG（base 2）,PLOG,NONE"),
+    make_option(c("--standardize"),            type = "logical",   default = F,                     help = "要不要标准化"),
+    make_option(c("--warn_prevalence"),        type = "logical",   default = F,                     help = "仅丰度分析就是FALSE；真实流行率效应和丰度效应就是TRUE"),
+    make_option(c("--evaluate_only"),          type = "character", default = NULL,           help = "仅评估丰度（abundance）模型还是流行率（prevalence）模型 默认是NULL"),
+    make_option(c("--plot_summary_plot"),      type = "logical",   default = T,                     help = "显著关联汇总图summary_plot.pdf"),
+    make_option(c("--summary_plot_first_n"),   type = "double",    default = 25,                    help = "展示前几个特征"),
+    make_option(c("--coef_plot_vars"),         type = "character", default = NULL,                  help = "NULL或者c('gender M','gender F')"),
+    make_option(c("--heatmap_vars"),           type = "character", default = NULL,                  help = "展不展示热图NULL或者c('gender M','gender F')"),
+    make_option(c("--plot_associations"),      type = "logical",   default = T,                     help = "散点图"),
+    make_option(c("--max_pngs"),               type = "double",    default = 30,                    help = "展示前几个特征的png"),
+    make_option(c("--cores"),                  type = "double",    default = 1,                     help = "使用 4 个核心并行计算"),
+    make_option(c("--summary_plot_balanced"),  type = "logical",   default = F,                     help = "平均分配coef_plot_vars")
+    
+  )
+  opts <- parse_args(OptionParser(option_list = option_list))
+}
+
+############################ Read in #################
+Map <- read_tsv(opts$map) %>%
+  rename_at(c(1), ~"SampleID") %>%
+  mutate(group = fct_inorder(group))
+
+# 行为样本，列为菌群
+#SampleID,Bacteroides,Prevotella,Lactobacillus,Roseburia,Clostridium,Streptococcus
+#S1,1500,200,50,300,0,100
+#S2,3000,50,150,0,400,80
+#S3,1200,300,30,250,100,200
+#S4,800,150,200,100,50,0
+
+genus <- read_tsv(opts$input) %>% 
+  rename_at(1,~"SampleID") %>% 
+  .[,c("SampleID",Map$SampleID)]
+
+
+#genus_longer <- pivot_longer(genus, 
+#             cols = colnames(genus)[-1],  # 明确指定需要转换的列
+#             names_to = "Sample",       # 新列名，用于存储原始列名
+#             values_to = "Value") 
+
+#genus_wider <- pivot_wider(genus_longer, 
+#            id_cols = Sample,       # 保留的列
+#            names_from = SampleID,       # 从"Sample"列获取新列名
+#            values_from = Value)    
+
+#genus <- genus_wider %>% rename_at(1,~"SampleID")
+# Uniform
+if (opts$unif){
+  genus[,2:ncol(genus)] <- sapply(2:ncol(genus),function(x) genus[,x]/sum(genus[,x]))
+}
+
+# 丰度筛选
+if(opts$per != 0){
+  genus <- genus %>% 
+    mutate(SELECT = sapply(1:nrow(.),function(x){
+      any(.[x,2:ncol(.)]>=opts$per)})) %>% 
+    .[.$SELECT,] %>% as_tibble %>% dplyr::select(-SELECT)
+}
+
+
+# 核心微生物筛选
+if(opts$value != 0){
+  otu_coverage <- apply(genus[,2:ncol(genus)],1,function(x) 
+    length(x[x>0])/(ncol(genus)-1))
+  genus <- genus[otu_coverage >= opts$value,]
+}
+
+
+## # 调整ASV名
+## if(opts$input == "../final.CLR.new.otu_taxa_table.xls"){
+##   ASV_name <- fread("../../5.分段年龄性别地区/ASV/inner_otu.genus.xls") %>% .[,1]
+##   rename <- separate(ASV_name, "OTU_tax", into = c("ASV", "Taxonomy"), sep = " ", remove = FALSE) %>% 
+##     select(-Taxonomy) %>% rename_at(2,~"SampleID")
+##   genus0 <- genus
+##   genus <- dplyr::left_join(rename,genus) %>% select(-SampleID) %>% rename_at(1,~"SampleID")
+## }
+
+
+# 物中挑选
+if(opts$select != "none"){
+  ss <- read_tsv(opts$select,col_names = F) %>% rename_at(1,~"SampleID")
+  genus <- inner_join(genus,ss)
+}
+
+Env <- read_tsv(opts$env) %>%
+  rename_at(c(1), ~"SampleID") %>%
+  dplyr::inner_join(., Map) %>% select(-group) %>% rename_at(4,~"region")
+
+
+################################################################################
+# 在Maaslin3中，输入数据的格式要求是：
+# 行 = 样本
+# 列 = 特征（物种）
+
+data1 <- as.matrix(genus[,-1] %>% t)
+colnames(data1) <- genus$SampleID
+
+data2 <- as.data.frame(Env[, -1])
+rownames(data2) <- Env$SampleID
+
+#data2 <- Map
+#rownames(data2) <- Map$SampleID
+#data1 <- data1[,colSums(data1) != 0]
+
+####################### maaslin3 #####################
+set.seed(20190731)
+
+fit_data3 <- maaslin3::maaslin3(
+  input_data = data1,                   # 微生物丰度数据
+  input_metadata = data2,               # 环境因子数据
+  output = opts$output,      # 输出路径
+  #fixed_effects = opts$fixed_effects,              # 固定效应 自变量：年龄分组（分类变量）
+  formula =  opts$formula ,
+  #formula =  ~ age + gender + region + age:gender + age:region ,
+  reference = opts$reference,                     #对照组 不设置就默认第一个
+  min_abundance = opts$min_abundance   ,                 # 经过normalization参数指定的方法处理后的值
+  min_prevalence = opts$min_prevalence   ,                 # 经过normalization参数指定的方法处理后的值
+  zero_threshold = opts$zero_threshold   ,                 # 经过normalization参数指定的方法处理后的值
+  min_variance = opts$min_variance   ,                 # 经过normalization参数指定的方法处理后的值
+  max_significance = opts$max_significance  ,               # 校正后的q值小于等于opts$pvalue 默认0.1
+  #max_significance = 1  ,               # 校正后的q值小于等于opts$pvalue 默认0.1
+  normalization = opts$normalization,                # 标准化方法（推荐 CLR 处理组成性数据）
+  transform = opts$transform,                   # 数据已转换则无需再变换
+  standardize = opts$standardize,                 # 不进行标准化
+  warn_prevalence = opts$warn_prevalence,              # 仅丰度分析就是FALSE；真实流行率效应和丰度效应就是TRUE
+  evaluate_only = opts$evaluate_only,          # 仅评估丰度（“abundance”）模型还是流行率（“prevalence”）模型
+  plot_summary_plot = opts$plot_summary_plot ,               # 显著关联汇总图summary_plot.pdf
+  summary_plot_first_n = opts$summary_plot_first_n,            # 展示前几个特征
+  #coef_plot_vars = opts$coef_plot_vars,       # 每次手动调一下 记得中间有空格
+  #heatmap_vars = opts$heatmap_vars,          # 热图
+  plot_associations = opts$plot_associations           ,     # 画散点图
+  max_pngs = opts$max_pngs                   ,    #排名前max_pngs的会用png展示出来
+  cores = opts$cores,                           # 使用 24 个核心并行计算
+  summary_plot_balanced = opts$summary_plot_balanced         
+)
+
+
+#原始 p 值（pval_individual）未经过多重检验校正，可能高估显著性，因此优先以校正后的qval_individual作为判断标准。
+#常用0.25
+#严格0.05
+#宽松0.5
+#然后再结合coef
+
+#summary_plot_balanced
+#展示coef_plot_vars中每个变量的前 N 个特征，其中 N 等于：ceiling (summary_plot_first_n /length (coef_plot_vars))
+#当分析涉及多个变量（如同时纳入age、genderF、genderM等）时，默认情况下summary_plot_first_n（如 25）会展示所有变量中排名前 25 的特征，可能导致某一变量占据多数展示位置，其他变量被忽略。
+#而summary_plot_balanced = TRUE会让每个变量 “公平分配” 展示名额
+#例如，若summary_plot_first_n = 25且coef_plot_vars包含 3 个变量，则每个变量展示ceiling(25/3) = 9个特征（总展示 27 个，略多于 25），确保每个变量都有足够的特征被呈现。
+#使用前提：
+#必须同时设置coef_plot_vars（指定要展示的变量），否则会报错。例如：
+
+#coef_plot_vars = c("age", "genderF", "genderM"),  # 3个变量
+#summary_plot_first_n = 25,
+#summary_plot_balanced = TRUE  # 每个变量展示9个特征
+
+
+
+#适用场景：
+#适合多变量分析（如同时研究年龄、性别等），希望在汇总图中均衡展示每个变量的重要关联特征，避免某一变量的特征 “垄断” 图表，更全面地呈现不同变量的关联模式。
+
+
+
+
+fit_data3$fit_data_abundance$results %>%
+  as_tibble() %>% # group_by(feature) %>% nest %>%
+  #filter(pval_individual < opts$pvalue) %>%
+  filter(qval_individual < opts$max_significance) %>%
+  pull(feature) %>%
+  unique() %>%
+  as_tibble() %>%
+  write_tsv(str_c(opts$output, "maaslin3.select.list"), col_names = FALSE)
+
+##########################################################################################
+# 找到最长参数的长度
+max_len <- max(sapply(opts, length))
+
+# 每个参数填充至相同长度
+opts_padded <- lapply(opts, function(x) {
+  max_len <- max(sapply(opts, length))  # 按最长参数长度对齐
+  if (length(x) < max_len) c(x, rep(NA, max_len - length(x))) else x
+})
+
+write_tsv(opts_padded %>% as.data.frame() %>% t() %>% as.data.frame() %>% rownames_to_column() %>% as_tibble() %>% mutate(across(everything(), ~replace_na(., ""))),
+          str_c(
+            "Parameter",
+            str_replace_all(as.character(date()), " ", "_") %>% str_replace_all(":", "_"),
+            ".xls"
+          ),
+          col_names = FALSE
+)
+
+```
+## Part4.Group_analysis
 ```shell
+#!/bin/bash
+#set -euxo pipefail
+##########  argparser  ###########
+## -c color.txt # 指定分组颜色
+## -p TRUE      # 是否成对分析
+## -b TRUE      # 是否排列组合
+# 20220614 v3.0.1.6 修改了lefse脚本，可以指定颜色了
+# v3.0.1.7 matrix_analysis合并adonis-anosim-mrpp-manova分析
+# v3.0.1.8 plot_community_boxplot.R修改单物种箱式图脚本
 
+until [ $# -eq 0 ]
+do
+  name=${1:1}; shift;
+  if [[ -z "$1" || $1 == -* ]] ; then eval "export $name=true"; else eval "export $name=$1"; shift; fi
+done
 ########## set default  ###########
-export Colour=none
-export Paired=FALSE
-export Combn=TRUE
-export Paint=none
-export Threshold=0.97
-export Heatmap_w="30"
-export Heatmap_h="10"
-export Heatmap_keyh="14"
-export Heatmap_marble="4-0-0-20"
-export Hclust_bar_h="30"
-export Hcluster_tree_h="30"
+if [ ${#c} == 0 ]; then Colour=none;  else Colour=`pwd`"/"$c; fi
+if [ ${#p} == 0 ]; then Paired=FALSE; else Paired=$p;         fi
+if [ ${#b} == 0 ]; then Combn=TRUE;   else Combn=$p;          fi
+if [ ${#k} == 0 ]; then Paint=none;  else Paint=$k;          fi
 
+echo "Define colors?"  $Colour
+echo "Paired test?"    $Paired
+echo "Combn annlysis?" $Combn
+echo "Paint Bucket?"   $Paint
+
+######################################################################################################################
+a=`cat map-group.txt | wc -l`
+if [ $a -ge 150 ]
+then
+    export Heatmap_w="30"
+    export Heatmap_h="10"
+    export Heatmap_keyh="14"
+    export Heatmap_marble="4-0-0-20"
+    export Hclust_bar_h="30"
+    export Hcluster_tree_h="30"
+elif [ $a -ge 100 ]
+then
+    export Heatmap_w="20"
+    export Heatmap_h="10"
+    export Heatmap_keyh="14"
+    export Heatmap_marble="4-0-0-14"
+    export Hclust_bar_h="20"
+    export Hcluster_tree_h="20"
+elif [ $a -ge 75 ]
+then
+    export Heatmap_w="16"
+    export Heatmap_h="10"
+    export Heatmap_keyh="13"
+    export Heatmap_marble="4-0-0-14"
+    export Hclust_bar_h="15"
+    export Hcluster_tree_h="15"
+elif [ $a -ge 50 ]
+then
+    export Heatmap_w="12"
+    export Heatmap_h="10"
+    export Heatmap_keyh="12"
+    export Heatmap_marble="4-0-0-14"
+    export Hclust_bar_h="10"
+    export Hcluster_tree_h="10"
+elif [ $a -ge 25 ]
+then
+    export Heatmap_w="10"
+    export Heatmap_h="10"
+    export Heatmap_keyh="10"
+    export Heatmap_marble="4-0-0-10"
+    export Hclust_bar_h="8"
+    export Hcluster_tree_h="8"
+elif [ $a -gt 0 ]
+then
+    export Heatmap_w="8"
+    export Heatmap_h="9"
+    export Heatmap_keyh="9"
+    export Heatmap_marble="4-0-0-8"
+    export Hclust_bar_h="5"
+    export Hcluster_tree_h="7"
+fi
+
+# need order; map-group.txt groups.txt File
+# run directory: results
 cat map-group.txt | grep -v "SampleID.*group" | awk '{print $1"\t"$1}' >order
 grep -v "SampleID.*group" map-group.txt | sed '1i#SampleID\tgroup' > map-group.txt.tmp
 rm map-group.txt
 mv map-group.txt.tmp map-group.txt
-NUM=`awk -F "\t" '{if(ARGIND==1) {val[$1]}else{if($1 in val)  delete val[$1]}}END{for(i in val) print i}' order ../process/otu_$Threshold/sample_order | wc -l`
+#cat map-group.txt |sed '1d'|awk -F"\t" '{if($2==last){group=group","$1}else{print group;group=$2":"$1};last=$2}END{print group}'|sed '1d' >map.txt
+NUM=`awk -F "\t" '{if(ARGIND==1) {val[$1]}else{if($1 in val)  delete val[$1]}}END{for(i in val) print i}' order ../process/ASV/sample_order | wc -l`
 if [ $NUM -gt 0 ]; then echo "command failed"; exit 1; fi
 
 mkdir Split_groups
 cd Split_groups
 ln -s ../map-group.txt .
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/split_group.R -g map-group.txt -m none -n 0
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/split_group.R -g map-group.txt -m none -n 0
 cd ..
 
-mkdir OTU_analysis
-cd OTU_analysis
-ln -s $PP1/process/otu_$Threshold/rarefac.otu_taxa_table.xls ./rarefac.otu_taxa_table1.xls
-ln -s $PP2/process/rarefac.otu_taxa_table.xls                ./rarefac.otu_taxa_table2.xls
-/opt/R-3.6.3/bin/R -e '
-library(tidyverse)
-library(data.table)
-otu1 <- fread("rarefac.otu_taxa_table1.xls")
-otu2 <- fread("rarefac.otu_taxa_table2.xls")
-otu <- full_join(otu1,otu2)
-otu[is.na(otu)]<-0
-otu <- cbind(otu %>% select(-taxonomy),otu[,"taxonomy"])
-write_tsv(otu,"rarefac.otu_taxa_table.xls")
-'
+mkdir ASV_analysis
+cd ASV_analysis
+#------ 原代码 ------
+#cp ../../process/ASV/rarefac.otu_taxa_table.xls .
+#sed -i 's/ASV ID/OTU_ID/g' rarefac.otu_taxa_table.xls
+# 然后用R把这个文件修改一下
+#------ ------ ------
 
-sed -i 's/OTU ID/OTU_ID/g' rarefac.otu_taxa_table.xls
-cp $PP1/process/otu_$Threshold/otu_reps.fasta .
+#------ 修改后 ------
+cp ../../process/ASV/rarefac.otu_taxa_table.xls .
+sed -i 's/ASV ID/OTU_ID/g' rarefac.otu_taxa_table.xls
+ln -s /Mobio/users/yanlv/Project/wuzhongwen/20250115005/analysis_Thu_Jan_23_2025-01-23_15_38_26/4.group/4.7.Tax_test/3/otu_reps_tax_assignments.txt ./
+R -e 'library(data.table)
+rarefac.otu_taxa_table <- fread("rarefac.otu_taxa_table.xls")
+fix_tax <- read_tsv("otu_reps_tax_assignments.txt") %>% .[,-3] %>% rename_all(~c("OTU_ID","taxonomy2"))
+left_join(rarefac.otu_taxa_table,fix_tax) %>% mutate(taxonomy=taxonomy2) %>% select(-taxonomy2) %>%
+  fwrite("fix.rarefac.otu_taxa_table.xls",sep = "\t")
+'
+#对比看一下 看下第一行最后面有没有制表符
+#head -n 10 rarefac.otu_taxa_table.xls > 01.xls
+#head -n 10 fix.rarefac.otu_taxa_table.xls > 02.xls
+#rm 01.xls 02.xls
+rm otu_reps_tax_assignments.txt rarefac.otu_taxa_table.xls
+mv fix.rarefac.otu_taxa_table.xls rarefac.otu_taxa_table.xls
+#------ ------ ------ ------ ------ ------ ------ ------ ------ ------ ------ ------ ------
+
+cp ../../process/ASV/otu_reps.fasta .
 cp ../map-group.txt .
 less otu_reps.fasta |awk -F '_' '{print $1}' > otu_reps.raw.fasta
-python ~/scripts/tax_split.v2.0.2.py -i rarefac.otu_taxa_table.xls -m map-group.txt -r otu_reps.raw.fasta -t 0.001
 
-mkdir OTU_tree
-cd OTU_tree
-ln -s ../map.otu_reps.raw.fasta ./otu_reps.raw.fasta
-ln -s ../unrooted.otu_tree_anno.0.001.xls .
-muscle -in otu_reps.raw.fasta -out otu_reps.raw_aligned.fasta
-FastTree -nt otu_reps.raw_aligned.fasta > unroot.otu_reps.raw_aligned.fasta.tre
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/unroot_tree.R -t unroot.otu_reps.raw_aligned.fasta.tre -a unrooted.otu_tree_anno.0.001.xls -s phylum
-rm Rplots.pdf
-cd ..
+python /work/users/chaoliu/scripts/tax_split.v2.0.2.py -i rarefac.otu_taxa_table.xls -m map-group.txt -r otu_reps.raw.fasta -t 0 -f F
+
+#mkdir ASV_tree
+#cd ASV_tree
+#ln -s ../map.otu_reps.raw.fasta ./ASV_reps.raw.fasta
+#ln -s ../unrooted.otu_tree_anno.0.001.xls ./unrooted.ASV_tree_anno.0.001.xls
+#muscle -in ASV_reps.raw.fasta -out ASV_reps.raw_aligned.fasta
+#FastTree -nt ASV_reps.raw_aligned.fasta > unroot.ASV_reps.raw_aligned.fasta.tre
+#/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/unroot_tree.R -t unroot.ASV_reps.raw_aligned.fasta.tre -a unrooted.ASV_tree_anno.0.001.xls -s phylum
+#rm Rplots.pdf
+#cd ..
 
 cd Krona
 for i in *.xls; do ktImportText $i -o $i.html;done
@@ -286,228 +869,270 @@ cd ..
 
 mkdir Core_Microbiome
 cd Core_Microbiome
-ln -s ../otu.genus.xls ./rarefac.otu_genus.xls
+ln -s ../../OTU_Taxa/rarefac.otu_genus.xls
 ln -s ../map-group.txt .
-sed 's/\t$//' rarefac.otu_genus.xls > fix.rarefac.otu_genus.xls
-sed -i 's/ //g' fix.rarefac.otu_genus.xls
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/core_microbiome.R -i fix.rarefac.otu_genus.xls -m map-group.txt
+sed 's/\t$//' rarefac.otu_genus.xls > fix.rarefac.ASV_genus.xls
+# 此时此刻 刚刚生成的fix.rarefac.ASV_genus.xls的第一行最后面还是制表符 手动删一下
+sed -i 's/ //g' fix.rarefac.ASV_genus.xls
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/core_microbiome.R -i fix.rarefac.ASV_genus.xls -m map-group.txt -c $Colour
 
 cd ../../
-mv OTU_analysis/Core_Microbiome  OTU_analysis/Krona OTU_analysis/OTU_tree .
+mv ASV_analysis/Core_Microbiome  ASV_analysis/Krona ASV_analysis/ASV_tree .
+#rm -rf OTU_analysis
 
 rm -rf OTU_Taxa
-mv OTU_analysis OTU_Taxa
-cd OTU_Taxa
+mv ASV_analysis ASV_Taxa
+cd ASV_Taxa
 rm rarefac.otu_taxa_table.xls otu_reps.raw.fasta otu_reps.fasta
-mv map.otu_reps.raw.fasta otu_reps.raw.fasta
-mv map.otu_table.xls rarefac.otu_table.xls
-mv map.otu_table.percent.xls rarefac.otu_table.percent.xls
-mv map.rarefac.otu_taxa_table.xls rarefac.otu_taxa_table.xls
-mv otu.genus.xls rarefac.otu_genus.xls
+mv map.otu_reps.raw.fasta ASV_reps.raw.fasta
+mv map.otu_table.xls rarefac.ASV_table.xls
+mv map.otu_table.percent.xls rarefac.ASV_table.percent.xls
+mv map.rarefac.otu_taxa_table.xls rarefac.ASV_taxa_table.xls
+mv otu.genus.xls rarefac.ASV_genus.xls
 
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -t rank -r $Paired -o F -i rarefac.otu_genus.xls  -n 2 -p 30  -m map-group.txt  -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -r $Paired -o F -i rarefac.ASV_genus.xls -n 2 -p 20  -m map-group.txt  -c $Colour --combn $Combn
+cp ../results/OTU_Taxa/otu_table.xls ./
+cp ../results/OTU_Taxa/otu_taxa_table.xls ./
 
 cd ..
 
 #Specaccum
-mkdir Specaccum
 cd Specaccum
-ln -s ../OTU_Taxa/rarefac.otu_table.xls .
+ln -s ../ASV_Taxa/rarefac.ASV_table.xls .
 ln -s ../map-group.txt .
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Specaccum.R -i rarefac.otu_table.xls -m map-group.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Specaccum.R -i rarefac.ASV_table.xls -m map-group.txt -c $Colour -d ASV
 rm *.xls
 cd ../
 
 #Venn
 mkdir Venn
 cd Venn
-ln -s ../OTU_Taxa/rarefac.otu_genus.xls .
+ln -s ../ASV_Taxa/rarefac.ASV_genus.xls .
 ln -s ../map-group.txt
-/usr/local/R-4.0.5/bin/Rscript ~/scripts/venn_upset.R -i rarefac.otu_genus.xls -g map-group.txt -m all -c $Colour
+Rscript /work/users/chaoliu/scripts/venn_upset.R -i rarefac.ASV_genus.xls -g map-group.txt -m all -c $Colour
 cd ../
 
 mkdir Corrplot
 cd Corrplot
-ln -s ../OTU_Taxa/rarefac.otu_genus.xls .
+ln -s ../ASV_Taxa/rarefac.ASV_genus.xls .
 ln -s ../map-group.txt .
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Spearman_corrplot.R -i rarefac.otu_genus.xls -m map-group.txt -o otu_top50
+Rscript /work/users/chaoliu/scripts/Spearman_corrplot.R -i rarefac.ASV_genus.xls -m map-group.txt -o ASV_top50
 cd ..
 
 #Rank_abundance
-mkdir Rank_abundance
 cd Rank_abundance
-ln -s ../OTU_Taxa/rarefac.otu_table.xls
-perl ~/scripts/rank_abundance.pl -i rarefac.otu_table.xls -gd ../map-group.txt  -o rankabundance.group.pdf -w 6 -h 5 -color $Colour
-rm rarefac.otu_table.xls
+ln -s ../ASV_Taxa/rarefac.ASV_table.xls
+perl /work/users/chaoliu/scripts/rank_abundance.pl -i rarefac.ASV_table.xls -gd ../map-group.txt  -o rankabundance.group.pdf -w 6 -h 5 -color $Colour -mode ASV
+rm rarefac.ASV_table.xls
 cd ../
 
 #Alpha_rarefac
 mkdir Alpha_rarefac
-cp $PP1/process/otu_0.97hhh/otu_0.97/subsample/alpha_subsample/*.r_chao       Alpha_rarefac -rl
-cp $PP1/process/otu_0.97hhh/otu_0.97/subsample/alpha_subsample/*.r_shannon    Alpha_rarefac -rl
-cp $PP1/process/otu_0.97hhh/otu_0.97/subsample/alpha_subsample/*.r_simpson    Alpha_rarefac -rl
-cp $PP1/process/otu_0.97hhh/otu_0.97/subsample/alpha_subsample/*.rabund       Alpha_rarefac -rl
-cp $PP1/process/otu_0.97hhh/otu_0.97/subsample/alpha_subsample/*.rarefaction  Alpha_rarefac -rl
-cp $PP1/process/otu_0.97hhh/otu_0.97/subsample/alpha_subsample/*.summary      Alpha_rarefac -rl
-cp $PP2/process/subsample/alpha_subsample/*.r_chao       Alpha_rarefac -rl
-cp $PP2/process/subsample/alpha_subsample/*.r_shannon    Alpha_rarefac -rl
-cp $PP2/process/subsample/alpha_subsample/*.r_simpson    Alpha_rarefac -rl
-cp $PP2/process/subsample/alpha_subsample/*.rabund       Alpha_rarefac -rl
-cp $PP2/process/subsample/alpha_subsample/*.rarefaction  Alpha_rarefac -rl
-cp $PP2/process/subsample/alpha_subsample/*.summary      Alpha_rarefac -rl
-
+cp ../process/ASV/alpha_rarefac/* Alpha_rarefac -r
 cd Alpha_rarefac/
+rm map-group.txt
+#这个之前出过图 把之前出的图和表都删了
 ln -s ../map-group.txt ./
-python ~/scripts/plot_alpha_diversity.py -i rarefaction
-python ~/scripts/plot_alpha_diversity.py -i r_shannon
-python ~/scripts/plot_alpha_diversity.py -i rarefaction -m map-group.txt -c $Colour
-python ~/scripts/plot_alpha_diversity.py -i r_shannon -m map-group.txt -c $Colour
-rm ../Rarefactions/*.pdf ../Rarefactions/otus.*.rarefaction
-rm ../Shannon_rarefac/*.pdf ../Shannon_rarefac/otus.*.r_shannon
-mkdir ../Rarefactions ../Shannon_rarefac
+rename 's/\.rarefaction/\.rarefaction_asv/g' otus.*.rarefaction
+#python /work/users/chaoliu/scripts/plot_alpha_diversity.py -i rarefaction_asv
+#python /work/users/chaoliu/scripts/plot_alpha_diversity.py -i r_shannon
+python /work/users/chaoliu/scripts/plot_alpha_diversity.py -i rarefaction_asv -m map-group.txt -c $Colour
+python /work/users/chaoliu/scripts/plot_alpha_diversity.py -i r_shannon -m map-group.txt -c $Colour
+rm ../Rarefactions/*.pdf
+rm ../Shannon_rarefac/*.pdf
 mv rarefaction_* ../Rarefactions
 mv r_shannon_* ../Shannon_rarefac
 
 ln -s ../map-group.txt .
+rename 's/\.rarefaction_asv/\.rarefaction/g' otus.*.rarefaction_asv
 alpha_rarefac.pl map-group.txt > alpha_rarefac.summary.xls
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Alpha_diversity_box_plot.R -a alpha_rarefac.summary.xls -g map-group.txt -c $Colour
+sed -i 's/observed_otus/observed_asvs/'  alpha_rarefac.summary.xls
 
 #Wilcox-alpha
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/alpha_diversity_test.R -a alpha_rarefac.summary.xls -g map-group.txt -t $Paired
+#/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/alpha_diversity_test.R -a alpha_rarefac.summary.xls -g map-group.txt -t $Paired
+/usr/local/R-4.3.1/bin/Rscript /work/users/yuren/Scripts/alpha_diversity_test.pro.R -a alpha_rarefac.summary.xls -g map-group.txt -t unpara -r $Paired --pv 0.05 --pj 1 --combn $Combn
+
+#/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Alpha_diversity_box_plot.R -a alpha_rarefac.summary.xls -g map-group.txt -c $Colour
+/usr/local/R-4.3.1/bin/Rscript /work/users/yuren/Scripts/plot_index_boxplot.pro.R -i alpha_rarefac.summary.xls -m map-group.txt -c $Colour -d alpha --test Alpha_diversity.combn.xls -f FALSE --bb cloud -l 0 --cores 1
 rm *.r mothur* otus.* *.txt
 cd ../
 
-cd $PP2/process
-cp $PP1/process/otu_0.97/map.txt ./
-less rarefac.otu_table.xls|grep --color 'OTU ID'|sed 's/OTU ID//'|xargs -n1|sort -n|awk '{print $1"\t"$1}' >>map.txt
-ln -s $PP1/process/otu_0.97/rarefac.otu_table.xls rarefac.otu_table1.xls
-python ~/scripts/merge_table.py -i1 rarefac.otu_table1.xls -i2 rarefac.otu_table.xls -d1 none -d2 none -o new.rarefac.otu_table.xls
-biom convert -i new.rarefac.otu_table.xls -o new.rarefac.otu_table.biom --table-type="OTU table" --to-hdf5
-
-ln -s $PP1/process/otu_0.97/otu_reps.raw_aligned.fasta.tre ./
-cp /work/scripts/16s/qiime_parameters_97.txt ./qiime_parameters_970.txt
-beta_diversity_through_plots.py -i new.rarefac.otu_table.biom -m map.txt -o beta_diversity -p qiime_parameters_970.txt -t otu_reps.raw_aligned.fasta.tre
-cd -
-
-conda deactivate
-
-rm Beta_diversity/ -r
-mkdir Beta_diversity
-cp $PP2/process/beta_diversity/*.txt Beta_diversity/
-
 #Hcluster_tree 
-mkdir Hcluster_tree
 cd Hcluster_tree 
 ln -s ../Beta_diversity/bray_curtis_dm.txt ../Beta_diversity/unweighted_unifrac_dm.txt ../Beta_diversity/weighted_unifrac_dm.txt ../map-group.txt ./ 
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plot_tree.R -i bray_curtis_dm.txt -m map-group.txt -t average -c $Colour
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plot_tree.R -i unweighted_unifrac_dm.txt -m map-group.txt -t average -c $Colour
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plot_tree.R -i weighted_unifrac_dm.txt -m map-group.txt -t average -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_tree.R -i bray_curtis_dm.txt -m map-group.txt -t average -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_tree.R -i unweighted_unifrac_dm.txt -m map-group.txt -t average -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_tree.R -i weighted_unifrac_dm.txt -m map-group.txt -t average -c $Colour
 rm *.txt *.r Rplots.pdf
 cd ../
 
 #Beta_diversity
 cd Beta_diversity
 ln -s ../map-group.txt
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Matrix_analysis.R -i bray_curtis_dm.txt        -g map-group.txt -c $Colour  -m $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Matrix_analysis.R -i unweighted_unifrac_dm.txt -g map-group.txt -c $Colour  -m $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Matrix_analysis.R -i weighted_unifrac_dm.txt   -g map-group.txt -c $Colour  -m $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Matrix_analysis.R -i bray_curtis_dm.txt        -g map-group.txt  -c $Colour  -m $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Matrix_analysis.R -i unweighted_unifrac_dm.txt -g map-group.txt  -c $Colour  -m $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Matrix_analysis.R -i weighted_unifrac_dm.txt   -g map-group.txt  -c $Colour  -m $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Matrix_analysis.R -i jaccard-binary_dm.txt     -g map-group.txt  -c $Colour  -m $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Matrix_analysis.R -i euclidean_dm.txt          -g map-group.txt  -c $Colour  -m $Combn
 
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plot_matrix.R -j FALSE -i bray_curtis_dm.txt        -g map-group.txt -c $Colour
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plot_matrix.R -j FALSE -i unweighted_unifrac_dm.txt -g map-group.txt -c $Colour
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plot_matrix.R -j FALSE -i weighted_unifrac_dm.txt   -g map-group.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_matrix.R -j FALSE -i bray_curtis_dm.txt        -g map-group.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_matrix.R -j FALSE -i unweighted_unifrac_dm.txt -g map-group.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_matrix.R -j FALSE -i weighted_unifrac_dm.txt   -g map-group.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_matrix.R -j FALSE -i jaccard-binary_dm.txt     -g map-group.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_matrix.R -j FALSE -i euclidean_dm.txt          -g map-group.txt -c $Colour
 
 mkdir Anosim Adonis MRPP MANOVA
 mv *anosim* Anosim
 mv *adonis* Adonis
-mv *mrpp*   MRPP
+mv *mrpp* MRPP
 mv *MANOVA* MANOVA
 cd ..
 
+mkdir Beta_diversity_clr
+cd Beta_diversity_clr
+ln -s ../map-group.txt ./
+ln -s ../../process/ASV/ASV_absolute_analysis/aitchison_dm.txt ./
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Matrix_analysis.R -i aitchison_dm.txt          -g map-group.txt  -c $Colour  -m $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_matrix.R -j FALSE -i aitchison_dm.txt          -g map-group.txt -c $Colour
+
+mkdir Anosim Adonis MRPP MANOVA
+mv *anosim* Anosim
+mv *adonis* Adonis
+mv *mrpp* MRPP
+mv *MANOVA* MANOVA
+
+# 创建不同可视化目录
+for dir in noname 3D name ellipse box crossbar central; do
+  mkdir $dir
+done
+
+# noname - 基础PCoA图
+for pc in "1-2" "1-3" "2-3"; do
+  python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i aitchison_dm.txt -md PCoA -pc $pc -map map-group.txt -col $Colour
+done
+mv *.pdf noname/
+
+# 3D - 三维PCoA图
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plotly_PCoA-3D.R -i aitchison_dm.txt -c $Colour
+mv *.pdf 3D/
+
+# name - 带样本名的PCoA图
+for pc in "1-2" "1-3" "2-3"; do
+  python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i aitchison_dm.txt -md PCoA -pc $pc -map map-group.txt -col $Colour
+done
+mv *.pdf name/
+
+# ellipse - 带置信椭圆的PCoA图
+for pc in "1-2" "1-3" "2-3"; do
+  python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i aitchison_dm.txt -md PCoA -pc $pc -map map-group.txt -col $Colour
+done
+mv *.pdf ellipse/
+
+# box - 带箱线图和置信椭圆的PCoA图
+for pc in "1-2" "1-3" "2-3"; do
+  python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i aitchison_dm.txt -md PCoA -pc $pc -map map-group.txt -col $Colour
+done
+mv *.pdf box/
+
+# crossbar - 带十字线的PCoA图
+for pc in "1-2" "1-3" "2-3"; do
+  python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i aitchison_dm.txt -ct 2 -md PCoA -pc $pc -map map-group.txt -col $Colour
+done
+mv *.pdf crossbar/
+
+# central - 带中心点的PCoA图
+for pc in "1-2" "1-3" "2-3"; do
+  python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i aitchison_dm.txt -ct 1 -md PCoA -pc $pc -map map-group.txt -col $Colour
+done
+mv *.pdf central/
+
+# NMDS
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i aitchison_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+
+rm cmd.r 
+cd ../
+
 #Community
 rm -rf Community/
-mv OTU_Taxa/Community .
+mv ASV_Taxa/Community .
 cd Community
 ln -s ../order ./sample
 sed -i 's/ //g' *.xls
 if [[ -f "../paint.txt" ]];then ln -s ../paint.txt ;fi
 
 mkdir Community_barplot
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -i phylum.xls  -n 2 -p 50 --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -i class.xls   -n 2 -p 50 --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -i order.xls   -n 2 -p 50 --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -i family.xls  -n 2 -p 50 --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -i genus.xls   -n 2 -p 50 --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i phylum.xls  -n 2 -p 50 --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i class.xls   -n 2 -p 50 --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i order.xls   -n 2 -p 50 --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i family.xls  -n 2 -p 50 --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i genus.xls   -n 2 -p 50 --paint $Paint
 mv *.pdf percent.*.xls ./Community_barplot/
 
 ln -s ../order ./sample
 cp ../map-group.txt ./
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 2 -i phylum.xls -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 2 -i class.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 2 -i order.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 2 -i family.xls -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 2 -i genus.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 2 -i phylum.xls -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 2 -i class.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 2 -i order.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 2 -i family.xls -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 2 -i genus.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
 mkdir Community_barplot_groups/
-mv *.pdf sort.percent.* ./Community_barplot_groups/
+mv *.pdf sort.percent.*.xls ./Community_barplot_groups/
 
 mkdir Community_average
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 1 -i phylum.xls -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 1 -i class.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 1 -i order.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 1 -i family.xls -n 2 -p 50 -m map-group.txt --paint $Paint
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -a 1 -i genus.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
-mv *.pdf average.percent.* ./Community_average
-
-
-mkdir Community_bubble
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -b 2 -i phylum.xls -p 0   
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -b 2 -i class.xls  -p 0.01
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -b 2 -i order.xls  -p 0.01
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -b 2 -i family.xls -p 0.01
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -b 2 -i genus.xls  -p 0.01
-mv *.pdf ./Community_bubble
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 1 -i phylum.xls -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 1 -i class.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 1 -i order.xls  -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 1 -i family.xls -n 2 -p 50 -m map-group.txt --paint $Paint
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -a 1 -i genus.xls  -n 2 -p 50 -m map-group.txt --paint $Paint -z 10
+mv *.pdf average.percent.*.xls ./Community_average
 
 mkdir Community_test
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -t rank -r $Paired -o F -i phylum.xls -p 0.01 -m map-group.txt -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -t rank -r $Paired -o F -i class.xls  -p 0.01 -m map-group.txt -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -t rank -r $Paired -o F -i order.xls  -n 2 -p 30 -m map-group.txt -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -t rank -r $Paired -o F -i family.xls -n 2 -p 30 -m map-group.txt -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/Community_plot_test.R -t rank -r $Paired -o F -i genus.xls  -n 2 -p 30 -m map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -r $Paired -o F -i phylum.xls -p 0     -m map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -r $Paired -o F -i class.xls  -p 0.005 -m map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -r $Paired -o F -i order.xls  -p 0.005 -m map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -r $Paired -o F -i family.xls -p 0.005 -m map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -r $Paired -o F -i genus.xls  -p 0.005 -m map-group.txt -c $Colour --combn $Combn
 mv *.pdf *rank_sum*.xls Community_test
-rm *.r percent*.xls
+rm *.r percent*.xls Rplots.pdf
 
 mkdir Heatmap_tax
-plot-heatmap.pl -i Community_barplot_groups/sort.percent.genus.xls  -o heatmap.genus.pdf  -rt 0 -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
-plot-heatmap.pl -i Community_barplot_groups/sort.percent.family.xls -o heatmap.family.pdf -rt 0 -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
-plot-heatmap.pl -i Community_barplot_groups/sort.percent.order.xls  -o heatmap.order.pdf  -rt 0 -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
-plot-heatmap.pl -i Community_barplot_groups/sort.percent.class.xls  -o heatmap.class.pdf  -rt 0 -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
-plot-heatmap.pl -i Community_barplot_groups/sort.percent.phylum.xls -o heatmap.phylum.pdf -rt 0 -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
-
-rm *.pdf.xls
+plot-heatmap.pl -i Community_barplot_groups/sort.percent.genus.xls  -o heatmap.genus.pdf  -rtop 50 -ct 0 -slas 2 -rlc 0.7 -clc 0.7  -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i Community_barplot_groups/sort.percent.family.xls -o heatmap.family.pdf -rtop 50 -ct 0 -slas 2 -rlc 0.7 -clc 0.7  -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i Community_barplot_groups/sort.percent.order.xls  -o heatmap.order.pdf  -rtop 50 -ct 0 -slas 2 -rlc 0.7 -clc 0.7  -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i Community_barplot_groups/sort.percent.class.xls  -o heatmap.class.pdf  -rtop 50 -ct 0 -slas 2 -rlc 0.7 -clc 0.7  -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i Community_barplot_groups/sort.percent.phylum.xls -o heatmap.phylum.pdf -rtop 50 -ct 0 -slas 2 -rlc 0.7 -clc 0.7  -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+#python /work/users/chaoliu/scripts/pheatmap.py -i Community_barplot_groups/sort.percent.genus.xls  -o pheatmap.genus.pdf -cd map-group.txt -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
+rm *.pdf.xls cmd.r dat.cor.dist.xls dat.cor.xls
 mv heatmap*.pdf Heatmap_tax
 
 #Community_boxplot
 mkdir Community_boxplot
 cd Community_boxplot
-ln -s ../../map-group.txt ./
-cp ../phylum.percent.xls .
-cp ../genus.percent.xls  .
-cp ../family.percent.xls .
-cp ../order.percent.xls  .
-cp ../class.percent.xls  .
-mkdir phylum genus family class order
-/usr/local/R-3.6.0/bin/Rscript ~/Projects/yangzhifu/chenyue/20220720002/analysis_Wed_Jul_20_12_32_59_2022/20220908001/æŒ‰GP7.FS-FM-FHH-FFMTåˆ†ç»„ç»“æžœ/Community/Community_boxplot/make_community_boxplot.r -i phylum.percent.xls -m map-group.txt -l 10 -p T -c $Colour
-mv *.pdf phylum
-/usr/local/R-3.6.0/bin/Rscript ~/Projects/yangzhifu/chenyue/20220720002/analysis_Wed_Jul_20_12_32_59_2022/20220908001/æŒ‰GP7.FS-FM-FHH-FFMTåˆ†ç»„ç»“æžœ/Community/Community_boxplot/make_community_boxplot.r -i genus.percent.xls  -m map-group.txt -l 10 -p T -c $Colour
-mv *.pdf genus
-/usr/local/R-3.6.0/bin/Rscript ~/Projects/yangzhifu/chenyue/20220720002/analysis_Wed_Jul_20_12_32_59_2022/20220908001/æŒ‰GP7.FS-FM-FHH-FFMTåˆ†ç»„ç»“æžœ/Community/Community_boxplot/make_community_boxplot.r -i order.percent.xls  -m map-group.txt -l 10 -p T -c $Colour
-mv *.pdf order
-/usr/local/R-3.6.0/bin/Rscript ~/Projects/yangzhifu/chenyue/20220720002/analysis_Wed_Jul_20_12_32_59_2022/20220908001/æŒ‰GP7.FS-FM-FHH-FFMTåˆ†ç»„ç»“æžœ/Community/Community_boxplot/make_community_boxplot.r -i family.percent.xls -m map-group.txt -l 10 -p T -c $Colour
-mv *.pdf family
-/usr/local/R-3.6.0/bin/Rscript ~/Projects/yangzhifu/chenyue/20220720002/analysis_Wed_Jul_20_12_32_59_2022/20220908001/æŒ‰GP7.FS-FM-FHH-FFMTåˆ†ç»„ç»“æžœ/Community/Community_boxplot/make_community_boxplot.r -i class.percent.xls  -m map-group.txt -l 10 -p T -c $Colour
-mv *.pdf  class
-rm *
-cd ../../
+mkdir -p phylum genus family class order species
+cd ..
+if [ $(awk 'NR>1 {print $2}' map-group.txt | sort | uniq | wc -l) -gt 2 ]
+then
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.species.xls -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/species" --test "Community_test/species.Kruskal-Wallis_rank_sum.combn.xls"
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.genus.xls   -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/genus"   --test "Community_test/genus.Kruskal-Wallis_rank_sum.combn.xls"  
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.family.xls  -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/family"  --test "Community_test/family.Kruskal-Wallis_rank_sum.combn.xls" 
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.order.xls   -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/order"   --test "Community_test/order.Kruskal-Wallis_rank_sum.combn.xls"  
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.class.xls   -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/class"   --test "Community_test/class.Kruskal-Wallis_rank_sum.combn.xls"  
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.phylum.xls  -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/phylum"  --test "Community_test/phylum.Kruskal-Wallis_rank_sum.combn.xls" 
+fi
 
+if [ $(awk 'NR>1 {print $2}' map-group.txt | sort | uniq | wc -l) == 2 ]
+then
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.species.xls -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/species" --test "Community_test/species.Wilcoxon_rank_sum_unpaired.combn.xls"
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.genus.xls   -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/genus"   --test "Community_test/genus.Wilcoxon_rank_sum_unpaired.combn.xls"
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.family.xls  -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/family"  --test "Community_test/family.Wilcoxon_rank_sum_unpaired.combn.xls"
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.order.xls   -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/order"   --test "Community_test/order.Wilcoxon_rank_sum_unpaired.combn.xls"
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.class.xls   -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/class"   --test "Community_test/class.Wilcoxon_rank_sum_unpaired.combn.xls"
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plot_community_boxplot.R -i Community_barplot/percent.phylum.xls  -m map-group.txt -l 10 -p T --bb bx -c $Colour -o "Community_boxplot/phylum"  --test "Community_test/phylum.Wilcoxon_rank_sum_unpaired.combn.xls"
+fi
+
+cd ../
+
+############################################################# Beta ####################################################################
 # PCoA
 mkdir PCoA
 rm -rf Pcoa
@@ -517,90 +1142,110 @@ ln -s ../map-group.txt ./
 ln -s ../Beta_diversity/bray_curtis_dm.txt ./
 ln -s ../Beta_diversity/weighted_unifrac_dm.txt ./
 ln -s ../Beta_diversity/unweighted_unifrac_dm.txt ./
-
+ln -s ../Beta_diversity/jaccard-binary_dm.txt ./
 #noname
 mkdir noname
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+
 mv *.pdf noname/
 
 # 3D
 mkdir 3D
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plotly_PCoA-3D.R -i bray_curtis_dm.txt        -c $Colour
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plotly_PCoA-3D.R -i weighted_unifrac_dm.txt   -c $Colour
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plotly_PCoA-3D.R -i unweighted_unifrac_dm.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plotly_PCoA-3D.R -i bray_curtis_dm.txt        -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plotly_PCoA-3D.R -i weighted_unifrac_dm.txt   -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plotly_PCoA-3D.R -i unweighted_unifrac_dm.txt -c $Colour
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plotly_PCoA-3D.R -i jaccard-binary_dm.txt -c $Colour
 mv *.pdf 3D
 
 #name
 mkdir name
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i jaccard-binary_dm.txt     -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i jaccard-binary_dm.txt     -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i jaccard-binary_dm.txt     -md PCoA -pc 2-3 -map map-group.txt -col $Colour
 mv *.pdf name/
 
 #ellipse
 mkdir ellipse
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i jaccard-binary_dm.txt     -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i jaccard-binary_dm.txt     -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i jaccard-binary_dm.txt     -md PCoA -pc 2-3 -map map-group.txt -col $Colour
 mv *.pdf ellipse/
 
 #box
 mkdir box
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i jaccard-binary_dm.txt     -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i jaccard-binary_dm.txt     -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i jaccard-binary_dm.txt     -md PCoA -pc 2-3 -map map-group.txt -col $Colour
 mv *.pdf box/
 
 # crossbar
 mkdir crossbar
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 2 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 2 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 2 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 2 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 2 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 2 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 2 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 2 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 2 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 2 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 2 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 2 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 2 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 2 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 2 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 2 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 2 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 2 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 2 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 2 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 2 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
 mv *.pdf crossbar/
 
 # central
 mkdir central
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 1 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 1 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 1 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 1 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 1 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 1 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 1 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 1 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 1 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 1 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 1 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 1 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 1 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 1 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 1 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 1 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 1 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 1 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 1 -md PCoA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 1 -md PCoA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 1 -md PCoA -pc 2-3 -map map-group.txt -col $Colour
 mv *.pdf central/
 
 rm cmd.r 
@@ -612,46 +1257,53 @@ ln -s ../map-group.txt ./
 ln -s ../Beta_diversity/bray_curtis_dm.txt ./
 ln -s ../Beta_diversity/weighted_unifrac_dm.txt ./
 ln -s ../Beta_diversity/unweighted_unifrac_dm.txt ./
+ln -s ../Beta_diversity/jaccard-binary_dm.txt ./
 #noname
 mkdir noname
-python ~/scripts/gg_CAP.py -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i jaccard-binary_dm.txt     -md CAP -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf noname/
 
 #name
 mkdir name
-python ~/scripts/gg_CAP.py -lab T -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -lab T -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -lab T -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -lab T -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -lab T -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -lab T -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -lab T -i jaccard-binary_dm.txt     -md CAP -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf name/
 
 #ellipse
 mkdir ellipse
-python ~/scripts/gg_CAP.py -e T -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -e T -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -e T -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -e T -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -e T -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -e T -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -e T -i jaccard-binary_dm.txt     -md CAP -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf ellipse/
 
 #box
 mkdir box
-python ~/scripts/gg_CAP.py -bx T -e T -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -bx T -e T -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -bx T -e T -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -bx T -e T -i bray_curtis_dm.txt        -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -bx T -e T -i weighted_unifrac_dm.txt   -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -bx T -e T -i unweighted_unifrac_dm.txt -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -bx T -e T -i jaccard-binary_dm.txt     -md CAP -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf box/
 
 # crossbar
 mkdir crossbar
-python ~/scripts/gg_CAP.py -i bray_curtis_dm.txt         -ct 2 -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -i weighted_unifrac_dm.txt    -ct 2 -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -i unweighted_unifrac_dm.txt  -ct 2 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i bray_curtis_dm.txt         -ct 2 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i weighted_unifrac_dm.txt    -ct 2 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i unweighted_unifrac_dm.txt  -ct 2 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i jaccard-binary_dm.txt      -ct 2 -md CAP -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf crossbar/
 
 # central
 mkdir central
-python ~/scripts/gg_CAP.py -i bray_curtis_dm.txt         -ct 1 -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -i weighted_unifrac_dm.txt    -ct 1 -md CAP -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_CAP.py -i unweighted_unifrac_dm.txt  -ct 1 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i bray_curtis_dm.txt         -ct 1 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i weighted_unifrac_dm.txt    -ct 1 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i unweighted_unifrac_dm.txt  -ct 1 -md CAP -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_CAP.py -i jaccard-binary_dm.txt      -ct 1 -md CAP -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf central/
 
 rm cmd.r 
@@ -662,36 +1314,36 @@ mkdir PCA
 rm Pca -rf
 cd PCA
 ln -s ../map-group.txt ./
-ln -s ../OTU_Taxa/rarefac.otu_table.xls ./
+ln -s ../ASV_Taxa/rarefac.ASV_table.xls ./
 
 #noname
 mkdir noname
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i rarefac.otu_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i rarefac.otu_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i rarefac.otu_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i rarefac.ASV_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i rarefac.ASV_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i rarefac.ASV_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
 mv PCA*.pdf noname/
 
-/usr/local/R-3.6.0/bin/Rscript ~/scripts/plotly_PCoA-3D.R -i rarefac.otu_table.xls -d PCA
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/plotly_PCoA-3D.R -i rarefac.ASV_table.xls -d PCA
 
 #name
 mkdir name
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i rarefac.otu_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i rarefac.otu_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i rarefac.otu_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i rarefac.ASV_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i rarefac.ASV_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i rarefac.ASV_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
 mv PCA*.pdf name/
 
 #ellipse
 mkdir ellipse
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i rarefac.otu_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i rarefac.otu_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i rarefac.otu_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i rarefac.ASV_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i rarefac.ASV_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i rarefac.ASV_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
 mv PCA*.pdf ellipse/
 
 #box
 mkdir box
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i rarefac.otu_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i rarefac.otu_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i rarefac.otu_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i rarefac.ASV_table.xls -md PCA -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i rarefac.ASV_table.xls -md PCA -pc 1-3 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i rarefac.ASV_table.xls -md PCA -pc 2-3 -map map-group.txt -col $Colour
 mv PCA*.pdf box/
 
 rm cmd.r 
@@ -705,34 +1357,56 @@ ln -s ../map-group.txt ./
 ln -s ../Beta_diversity/bray_curtis_dm.txt ./
 ln -s ../Beta_diversity/weighted_unifrac_dm.txt ./
 ln -s ../Beta_diversity/unweighted_unifrac_dm.txt ./
+ln -s ../Beta_diversity/jaccard-binary_dm.txt ./
 
 #noname
 mkdir noname
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+
 mv *.pdf noname/
 
 #name
 mkdir name
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -lab T -i jaccard-binary_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf name/
 
 #ellipse
 mkdir ellipse
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -e T -i jaccard-binary_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf ellipse/
 
 #box
 mkdir box
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
-python ~/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i bray_curtis_dm.txt        -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i weighted_unifrac_dm.txt   -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i unweighted_unifrac_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -bx T -e T -i jaccard-binary_dm.txt -md NMDS -pc 1-2 -map map-group.txt -col $Colour
 mv *.pdf box/
+
+# crossbar
+mkdir crossbar
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 2 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 2 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 2 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 2 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+mv *.pdf crossbar/
+
+# central
+mkdir central
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i bray_curtis_dm.txt         -ct 1 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i weighted_unifrac_dm.txt    -ct 1 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i unweighted_unifrac_dm.txt  -ct 1 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+python /work/users/chaoliu/scripts/gg_PCoA_NMDS_PCA.py -i jaccard-binary_dm.txt      -ct 1 -md NMDS -pc 1-2 -map map-group.txt -col $Colour
+mv *.pdf central/
 
 rm cmd.r 
 cd ../
@@ -741,14 +1415,13 @@ cd ../
 mkdir PLS-DA
 cd PLS-DA
 ln -s ../map-group.txt ./
-ln -s ../OTU_Taxa/rarefac.otu_table.xls ./
+ln -s ../ASV_Taxa/rarefac.ASV_table.xls ./
 
-perl ~/scripts/plsda.pl -i rarefac.otu_table.xls -m map-group.txt -o ./ -g group -l F -c $Colour
+perl /work/users/chaoliu/scripts/plsda.pl -i rarefac.ASV_table.xls -m map-group.txt -o ./ -g group -l F  -c $Colour
 cd ..
 #### treebar ###################################################
-mkdir Hclust_bar
 cd Hclust_bar/
-plot-treebar.pl -otu ../OTU_Taxa/rarefac.otu_table.xls -tax ../Community/phylum.xls -o treebar_otu_table_phylum.pdf -h $Hclust_bar_h -lcex 1.3
+plot-treebar.pl -otu ../ASV_Taxa/rarefac.ASV_table.xls -tax ../Community/phylum.xls -o treebar_ASV_table_phylum.pdf -h $Hclust_bar_h -lcex 1.3
 cd ..
 
 ######################################### Lefse #################################
@@ -759,31 +1432,31 @@ export R_LIBS=$R_HOME_DIR/lib64/R/library
 
 mkdir Lefse
 cd Lefse/
-cp ../OTU_Taxa/rarefac.otu_taxa_table.xls ./
-sed -i 's/;s__.*//g' rarefac.otu_taxa_table.xls
-python2 /work/scripts/16s/tax_split.py -i rarefac.otu_taxa_table.xls
+cp ../ASV_Taxa/rarefac.ASV_taxa_table.xls ./
+sed -i 's/;s__.*//g' rarefac.ASV_taxa_table.xls
+python2 /work/scripts/16s/tax_split.py -i rarefac.ASV_taxa_table.xls
 
-sh ~/scripts/S_S/001.Community.OTU.ASV.lefse.sh  -c $Colour
+sh /work/users/chaoliu/scripts/S_S/001.Community.OTU.ASV.lefse.sh  -c $Colour
 cd ../
 ####################################################### Random_Forest
 mkdir Random_Forest
 cd Random_Forest/
-ln -s ../OTU_Taxa/rarefac.otu_table.xls ./
-ln -s ../OTU_Taxa/rarefac.otu_genus.xls ./
+ln -s ../ASV_Taxa/rarefac.ASV_table.xls ./
+ln -s ../ASV_Taxa/rarefac.ASV_genus.xls ./
 ln -s ../map-group.txt ./
 ln -s ../order ./
-biom convert -i rarefac.otu_table.xls -o rarefac.otu_table.biom --table-type "OTU table" --to-hdf5
+biom convert -i rarefac.ASV_table.xls -o rarefac.ASV_table.biom --table-type "OTU table" --to-hdf5
 
-random_forest4key_out_select.pl rarefac.otu_table.biom rarefac.otu_genus.xls  map-group.txt 0.001
+random_forest4key_out_select_ASV.pl rarefac.ASV_table.biom rarefac.ASV_genus.xls  map-group.txt 0.001
 sortSample4otu_table.pl OTU-extract.all.xls order > OTU-extract.all.sort.xls
 cd ../
 
 ####################################################### Heatmap ####################################################################
 cd Heatmap
 rm ./*
-ln -s ../OTU_Taxa/rarefac.otu_genus.xls ./
+ln -s ../ASV_Taxa/rarefac.ASV_genus.xls ./
 ln -s ../map-group.txt ./
-plot-heatmap.pl -i rarefac.otu_genus.xls -o heatmap.otu.top50.pdf -rtop 50 -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_h -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i rarefac.ASV_genus.xls -o heatmap.ASV.top50.pdf -rtop 50 -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_h -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
 ln -s ../Random_Forest/OTU-extract.all.sort.xls ./
 bar_pie.pl -i OTU-extract.all.sort.xls -pie F -p 0.01
 sed -i '/Others/d' ALL.new.OTU-extract.all.sort.xls
@@ -791,17 +1464,17 @@ mv ALL.new.OTU-extract.all.sort.xls ALL.new.OTU-extract.all.sort.percent001.xls
 bar_pie.pl -i OTU-extract.all.sort.xls -pie F -p 0.03
 sed -i '/Others/d' ALL.new.OTU-extract.all.sort.xls
 mv ALL.new.OTU-extract.all.sort.xls ALL.new.OTU-extract.all.sort.percent003.xls
-plot-heatmap.pl -i OTU-extract.all.sort.xls                    -o heatmap.keyotu.pdf            -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
-plot-heatmap.pl -i ALL.new.OTU-extract.all.sort.percent001.xls -o heatmap.keyotu.percent001.pdf -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_h    -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
-plot-heatmap.pl -i ALL.new.OTU-extract.all.sort.percent003.xls -o heatmap.keyotu.percent003.pdf -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_h    -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i OTU-extract.all.sort.xls                    -o heatmap.keyASV.pdf            -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_keyh -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i ALL.new.OTU-extract.all.sort.percent001.xls -o heatmap.keyASV.percent001.pdf -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_h    -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
+plot-heatmap.pl -i ALL.new.OTU-extract.all.sort.percent003.xls -o heatmap.keyASV.percent003.pdf -ct 0 -slas 2 -rlc 0.7 -clc 0.7 -w $Heatmap_w -h $Heatmap_h    -lh 1:0.2:7:1 -marble $Heatmap_marble -cd map-group.txt -color $Colour
 rm ALL*.xls dat* bar* cmd.r ./*ct*
 cd ..
 
 mkdir Heatmap_PRETTY
 cd Heatmap_PRETTY
 ln -s ../map-group.txt ./
-ln -s ../OTU_Taxa/rarefac.otu_genus.xls ./
-python ~/scripts/pheatmap.py -i rarefac.otu_genus.xls -cd map-group.txt -o pheatmap.otu.top50.pdf -rtop 50 -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
+ln -s ../ASV_Taxa/rarefac.ASV_genus.xls ./
+python /work/users/chaoliu/scripts/pheatmap.py -i rarefac.ASV_genus.xls -cd map-group.txt -o pheatmap.ASV.top50.pdf -rtop 50 -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
 ln -s ../Random_Forest/OTU-extract.all.sort.xls ./
 bar_pie.pl -i OTU-extract.all.sort.xls -pie F -p 0.01
 sed -i '/Others/d' ALL.new.OTU-extract.all.sort.xls
@@ -809,44 +1482,100 @@ mv ALL.new.OTU-extract.all.sort.xls ALL.new.OTU-extract.all.sort.percent001.xls
 bar_pie.pl -i OTU-extract.all.sort.xls -pie F -p 0.03
 sed -i '/Others/d' ALL.new.OTU-extract.all.sort.xls
 mv ALL.new.OTU-extract.all.sort.xls ALL.new.OTU-extract.all.sort.percent003.xls
-python ~/scripts/pheatmap.py -i OTU-extract.all.sort.xls                    -o pheatmap.keyotu.pdf            -cd map-group.txt -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
-python ~/scripts/pheatmap.py -i ALL.new.OTU-extract.all.sort.percent001.xls -o pheatmap.keyotu.percent001.pdf -cd map-group.txt -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
-python ~/scripts/pheatmap.py -i ALL.new.OTU-extract.all.sort.percent003.xls -o pheatmap.keyotu.percent003.pdf -cd map-group.txt -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
+python /work/users/chaoliu/scripts/pheatmap.py -i OTU-extract.all.sort.xls                    -o pheatmap.keyASV.pdf            -cd map-group.txt -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
+python /work/users/chaoliu/scripts/pheatmap.py -i ALL.new.OTU-extract.all.sort.percent001.xls -o pheatmap.keyASV.percent001.pdf -cd map-group.txt -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
+python /work/users/chaoliu/scripts/pheatmap.py -i ALL.new.OTU-extract.all.sort.percent003.xls -o pheatmap.keyASV.percent003.pdf -cd map-group.txt -clust_c F -cs 0 -rs 1 -scale none -cc $Colour
 rm ALL*.xls dat* bar* cmd.r ./*ct*
 cd ../
+
+###################################################### Tax4Fun2 ###############################################################################################
+if [ -d Tax4Fun2 ];then
+cd Tax4Fun2/
+sh /work/users/chaoliu/scripts/S_S/Tax4Fun2.lefse.sh -c $Colour
+cd ..
+fi
 ##################################################### Picrust2 ################################################################################################################
 if [ -d Picrust2 ];then
 cd Picrust2/
-sh ~/scripts/S_S/Picrust2.lefse.sh -c $Colour
-cd ../
+sh /work/users/chaoliu/scripts/S_S/Picrust2.lefse.sh -c $Colour
+cd ..
 fi
 
+######################################################################### change_color ####################################################################
+#if [ "$Colour" != "none" ];then
+#sh /work/users/chaoliu/scripts/S_S/002.functional_prediction.OTU_ASV.change_color.sh -c $Colour
+#fi
+##################################################################################################################
 conda deactivate
+
 export R_HOME_DIR=/usr/local/R-3.6.0
 export R_LIBS=$R_HOME_DIR/lib64/R/library
 
+if [ -d Tax4Fun2 ];then
+cd  Tax4Fun2/
+mkdir Tax4Fun_pathway_summary
+mv Tax4Fun.pathways*_out.tsv Tax4Fun.KO_out.tsv Tax4Fun_pathway_summary
+cd Tax4Fun_pathway_summary
+rename 's/Tax4Fun.pathways/Tax4Fun_pathways/g' *.tsv
+rename 's/Tax4Fun.KO/Tax4Fun_KO/g' *.tsv
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i Tax4Fun_pathwaysLevel1_out.tsv -n 2 -p 50 -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i Tax4Fun_pathwaysLevel2_out.tsv -n 2 -p 50 -c $Colour --combn $Combn
+#/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i Tax4Fun_pathwaysLevel3_out.tsv -n 2 -p 50 -c $Colour --combn $Combn
+#/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i Tax4Fun_KO_out.tsv             -n 2 -p 50 -c $Colour --combn $Combn
+
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -o F -i Tax4Fun_pathwaysLevel1_out.tsv -n 0 -p 0.005 -m ../../map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -o F -i Tax4Fun_pathwaysLevel2_out.tsv -n 0 -p 0.005 -m ../../map-group.txt -c $Colour --combn $Combn
+#/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -o F -i Tax4Fun_pathwaysLevel3_out.tsv -n 0 -p 0.005 -m ../../map-group.txt -c $Colour --combn $Combn
+#/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -o F -i Tax4Fun_KO_out.tsv             -n 0 -p 0.005 -m ../../map-group.txt -c $Colour --combn $Combn
+rm Rplots.pdf
+cd ../../
+fi
+##################################################################################################################################################################################
 if [ -d Picrust2 ];then
-if [ -d Picrust2/KEGG_pathways_out ];then
-cd Picrust2/KEGG_pathways_out
+cd Picrust2
+cd KEGG_pathways_out
 mkdir KEGG_pathway_summary
 mv KEGG_pathwaysL* KEGG_pathway_summary
 cd KEGG_pathway_summary
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -i KEGG_pathwaysLevel1_out.tsv -n 2 -p 49 -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -i KEGG_pathwaysLevel2_out.tsv -n 2 -p 49 -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -i KEGG_pathwaysLevel3_out.tsv -n 2 -p 49 -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i KEGG_pathwaysLevel1_out.tsv -n 2 -p 50 -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i KEGG_pathwaysLevel2_out.tsv -n 2 -p 50 -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -i KEGG_pathwaysLevel3_out.tsv -n 2 -p 50 -c $Colour --combn $Combn
 
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -t rank -o F -i KEGG_pathwaysLevel1_out.tsv -n 0 -p 0.005  -m ../../map-group.txt -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -t rank -o F -i KEGG_pathwaysLevel2_out.tsv -n 0 -p 0.005  -m ../../map-group.txt -c $Colour --combn $Combn
-/usr/local/R-3.6.0/bin/Rscript ~/Scripts/Community_plot_test.R -t rank -o F -i KEGG_pathwaysLevel3_out.tsv -n 0 -p 0.005  -m ../../map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -o F -i KEGG_pathwaysLevel1_out.tsv -n 0 -p 0.005  -m ../../map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -o F -i KEGG_pathwaysLevel2_out.tsv -n 0 -p 0.005  -m ../../map-group.txt -c $Colour --combn $Combn
+/usr/local/R-3.6.0/bin/Rscript /work/users/chaoliu/scripts/Community_plot_test.R -t rank -o F -i KEGG_pathwaysLevel3_out.tsv -n 0 -p 0.005  -m ../../map-group.txt -c $Colour --combn $Combn
 rm Rplots.pdf
 cd ../../../
 fi
-fi
+
+####################################################################################################################################################################################
+rm NMDS/*.txt PCoA/*.txt PCA/*.txt  Community/*ALL* Community/*sh Community/sample*
+rm -r Estimators
+rm Rarefactions/*.rarefaction Shannon_rarefac/*.r_shannon
+rm Heatmap/ALL.new.* Heatmap/map-group.txt 
+rm Heatmap/OTU-extract.all.sort.xls Heatmap/dat.cor.* Heatmap/cmd.r Heatmap/bar.ALL.OTU-extract.all.sort.xls.pdf Heatmap/map-group.txt Heatmap/OTU-extract.all.sort.xls Heatmap/rarefac.otu_genus.xls
+rm Heatmap/-ct Heatmap/-ct.xls 
+rm Hclust_bar/cmd.r OTU_Taxa/otu_seqids.txt Venn/rarefac.otu_genus.xls Community/percent.*.xls
+
+#find ./ -name "*.biom" |xargs rm -rf
+find ./ -type d -name "tax_summary_a"| xargs rm -rf
+find ./ -type d -name "tax_summary_r"| xargs rm -rf
+find . -name "Rplots.pdf" | xargs rm -rf
+find . -name "*cmd.r"| xargs rm -rf
+#find . -name "otu_seqids.txt"| xargs rm -rf
+# 删除失效软连接
+for file in `find . -type l`
+do
+    if [ ! -e $file ]
+    then
+        echo "rm $file"
+        rm -f $file
+    fi
+done
+find . -name "*" -type f -size 0c | xargs -n 1 rm -f
 
 ```
-
-# Part.3 linear regression
-
+## Part5.liner_regression
 ```R
 library(ggplot2)
 library(MASS)
@@ -938,7 +1667,7 @@ mytheme <- function(){
     )
 }
 
-## 1.Analysis ä¸€ä¸ªèŒä¸‰ä¸ªå¹´é¾„æ®µåœ¨åŒä¸€å¼ å›¾ä¸Šçš„çº¿æ€§å›¾ ###########
+## 1.Analysis ä¸€ä¸ªè�Œä¸‰ä¸ªå¹´é¾„æ®µåœ¨å�Œä¸€å¼ å›¾ä¸Šçš„çº¿æ€§å›¾ ###########
 if(opts$bra == "1"){
   Analysis <- function(huge){ # x <- colnames(Env)[2];y <- colnames(DATA)[2];huge <- bind_cols(DATA[,y],Env[,x])
     NM <- colnames(huge)
@@ -999,9 +1728,9 @@ if(opts$bra == "1"){
   }
 }
 
-## 2.Analysis2ä¸€ä¸ªèŒotuä¸°åº¦å’Œå¹´é¾„çš„æ•£ç‚¹å›¾å’Œæ¯ä¸€å²å¹´é¾„ä¸‹å¹³å‡ä¸°åº¦çš„æŠ˜çº¿ï¼ˆæ¯ä¸€å²ä¸‹å¦‚æžœå°‘äºŽ3ä¸ªæ ·æœ¬å°±ä¸çº³å…¥ï¼‰ ###########
-## ï¼ˆ0-3å²å››èˆäº”å…¥ï¼Œ0.5ä»¥ä¸‹ç®—åš0å²ï¼Œåªç”¨å‡å€¼è¿žçº¿ï¼Œåˆ†ç”·å¥³ï¼Œä¸€ä¸ªå›¾ä¿©çº¿ï¼‰
-## æ¯”å¦‚3å²çš„äººæœ‰6ä¸ªï¼Œå…¶ä¸­2å¥³4ç”·ï¼Œä¸¤ä¸ªéƒ½å±•ç¤º
+## 2.Analysis2ä¸€ä¸ªè�Œotuä¸°åº¦å’Œå¹´é¾„çš„æ•£ç‚¹å›¾å’Œæ¯�ä¸€å²�å¹´é¾„ä¸‹å¹³å�‡ä¸°åº¦çš„æŠ˜çº¿ï¼ˆæ¯�ä¸€å²�ä¸‹å¦‚æžœå°‘äºŽ3ä¸ªæ ·æœ¬å°±ä¸�çº³å…¥ï¼‰ ###########
+## ï¼ˆ0-3å²�å››èˆ�äº”å…¥ï¼Œ0.5ä»¥ä¸‹ç®—å�š0å²�ï¼Œå�ªç”¨å�‡å€¼è¿žçº¿ï¼Œåˆ†ç”·å¥³ï¼Œä¸€ä¸ªå›¾ä¿©çº¿ï¼‰
+## æ¯”å¦‚3å²�çš„äººæœ‰6ä¸ªï¼Œå…¶ä¸­2å¥³4ç”·ï¼Œä¸¤ä¸ªéƒ½å±•ç¤º
 if(opts$bra == "2"){
   Analysis2 <- function(huge,ym,bee){ # x <- colnames(Env)[2];y <- colnames(DATA)[2];huge <- bind_cols(DATA[,y],Env[,x]);ym <- map ;bee <- DATA[,1]
     NM <- colnames(huge)
@@ -1035,11 +1764,11 @@ if(opts$bra == "2"){
   }
 }
 
-## 3.Analysis3å±žæ°´å¹³åšä¸€ä¸‹ä¸‰ä¸ªå¹´é¾„æ®µèŒå±žä¸Žå¹´é¾„çš„çº¿æ€§ç›¸å…³å›¾ï¼Œç»˜åˆ¶çº¿æ€§ç›¸å…³å›¾çš„å±žè¦æ±‚ï¼š ###################
-##ï¼ˆ1ï¼‰åœ¨ä»»æ„ä¸€ç»„ä¸­æœ‰è‡³å°‘75%çš„æ ·æœ¬ä¸­èƒ½æ£€æµ‹åˆ°ï¼›
-##ï¼ˆ2ï¼‰è‡³å°‘åœ¨ä¸€ä¸ªç»„ä¸­ä¸Žå¹´é¾„æœ‰æ˜¾è‘—ç›¸å…³æ€§ï¼›å…­æ¡çº¿ éƒ½ä¸æ˜¾è‘— p>0.05 å°±ä¸è¦å›¾
-##ï¼ˆ3ï¼‰å‡ºå›¾æ—¶è¦æ±‚æ ·æœ¬ç‚¹æŒ‰ç…§ç”·å¥³æ€§åˆ«åˆ†åˆ«ç”¨ä¸åŒé¢œè‰²å±•ç¤ºï¼Œä¸”ç”·å¥³åˆ†åˆ«åšä¸¤æ¡æ‹Ÿåˆç›´çº¿ï¼›
-##ï¼ˆ4ï¼‰æŠŠæ‰€æœ‰ç”»å›¾çš„å±žåœ¨ä¸‰ç»„ä¸¤ä¸ªæ€§åˆ«ä¸­çš„çº¿æ€§ç›¸å…³æ•°å€¼ï¼ˆR2ã€på€¼ã€æ–œçŽ‡ï¼‰éƒ½æ•´ç†åˆ°ä¸€ä¸ªæ•°æ®è¡¨ä¸­ï¼›
+## 3.Analysis3å±žæ°´å¹³å�šä¸€ä¸‹ä¸‰ä¸ªå¹´é¾„æ®µè�Œå±žä¸Žå¹´é¾„çš„çº¿æ€§ç›¸å…³å›¾ï¼Œç»˜åˆ¶çº¿æ€§ç›¸å…³å›¾çš„å±žè¦�æ±‚ï¼š ###################
+##ï¼ˆ1ï¼‰åœ¨ä»»æ„�ä¸€ç»„ä¸­æœ‰è‡³å°‘75%çš„æ ·æœ¬ä¸­èƒ½æ£€æµ‹åˆ°ï¼›
+##ï¼ˆ2ï¼‰è‡³å°‘åœ¨ä¸€ä¸ªç»„ä¸­ä¸Žå¹´é¾„æœ‰æ˜¾è‘—ç›¸å…³æ€§ï¼›å…­æ�¡çº¿ éƒ½ä¸�æ˜¾è‘— p>0.05 å°±ä¸�è¦�å›¾
+##ï¼ˆ3ï¼‰å‡ºå›¾æ—¶è¦�æ±‚æ ·æœ¬ç‚¹æŒ‰ç…§ç”·å¥³æ€§åˆ«åˆ†åˆ«ç”¨ä¸�å�Œé¢œè‰²å±•ç¤ºï¼Œä¸”ç”·å¥³åˆ†åˆ«å�šä¸¤æ�¡æ‹Ÿå�ˆç›´çº¿ï¼›
+##ï¼ˆ4ï¼‰æŠŠæ‰€æœ‰ç”»å›¾çš„å±žåœ¨ä¸‰ç»„ä¸¤ä¸ªæ€§åˆ«ä¸­çš„çº¿æ€§ç›¸å…³æ•°å€¼ï¼ˆR2ã€�på€¼ã€�æ–œçŽ‡ï¼‰éƒ½æ•´ç�†åˆ°ä¸€ä¸ªæ•°æ�®è¡¨ä¸­ï¼›
 if(opts$bra == "3"){
   Analysis3 <- function(huge,ym,hee){ # x <- colnames(Env)[2];y <- colnames(DATA)[3];huge <- bind_cols(DATA[,y],Env[,x]);ym <- map ;hee <- DATA[,1]
     NM <- colnames(huge)
@@ -1122,8 +1851,7 @@ if(opts$bra == "3"){
   }
 }
 
-## 4.OTUä¸°åº¦éƒ½å’Œå¹´é¾„åšä¸€ä¸‹ã€Šå¤šé¡¹å¼å›žå½’ã€‹ #############################
-#ï¼ˆå…¨å¹´é¾„ä¸€èµ·ï¼Œä¸åˆ†å¹´é¾„æ®µï¼Œç”·å¥³åˆ†åˆ«åšå›žå½’ï¼Œç”»åœ¨ä¸€ä¸ªå›¾ä¸Šï¼‰
+## 4.ASV #############################
 if(opts$bra == "4"){
   Analysis4 <- function(huge,ym,hee){ # x <- colnames(Env)[2];y <- colnames(DATA)[3];huge <- bind_cols(DATA[,y],Env[,x]);ym <- map ;hee <- DATA[,1]
     NM <- colnames(huge)
@@ -1197,11 +1925,7 @@ if(opts$bra == "4"){
 }
 
 
-## 5.Analysis5 æ˜¯å‡çº§ç‰ˆçš„Analysis3 ###################
-##ï¼ˆ1ï¼‰åœ¨ä»»æ„ä¸€ç»„ä¸­æœ‰è‡³å°‘75%çš„æ ·æœ¬ä¸­èƒ½æ£€æµ‹åˆ°ï¼›
-##ï¼ˆ2ï¼‰è‡³å°‘åœ¨ä¸€ä¸ªç»„ä¸­ä¸Žå¹´é¾„æœ‰æ˜¾è‘—ç›¸å…³æ€§ï¼›å…­æ¡çº¿ éƒ½ä¸æ˜¾è‘— p>0.05 å°±ä¸è¦å›¾
-##ï¼ˆ3ï¼‰å‡ºå›¾æ—¶è¦æ±‚æ ·æœ¬ç‚¹æŒ‰ç…§ç”·å¥³æ€§åˆ«åˆ†åˆ«ç”¨ä¸åŒé¢œè‰²å±•ç¤ºï¼Œä¸”ç”·å¥³åˆ†åˆ«åšä¸¤æ¡æ‹Ÿåˆç›´çº¿ï¼›
-##ï¼ˆ4ï¼‰æŠŠæ‰€æœ‰ç”»å›¾çš„å±žåœ¨ä¸‰ç»„ä¸¤ä¸ªæ€§åˆ«ä¸­çš„çº¿æ€§ç›¸å…³æ•°å€¼ï¼ˆR2ã€på€¼ã€æ–œçŽ‡ï¼‰éƒ½æ•´ç†åˆ°ä¸€ä¸ªæ•°æ®è¡¨ä¸­ï¼›
+## 5.Analysis ###################
 if(opts$bra == "5"){
   Dooo <- fread(opts$input)
   Doo1 <- Dooo %>% #mutate_if(is.numeric,~map_dbl(.x,function(y) y/ sum(.x))) %>%
@@ -1292,545 +2016,10 @@ write_tsv(opts %>% as.data.frame %>% t %>% as.data.frame %>% rownames_to_column(
                 str_replace_all(as.character(date())," ","_") %>% str_replace_all(":","_"),
                 ".xls"),
           col_names = FALSE)
-
-
 ```
 
-# Part.4 random\_forest
-
-```R
-library(tidyverse)
-library(magrittr)
-library(randomForest)
-library(pROC)
-library(optparse)
-library(broom)
-library(patchwork)
-library(MASS)
-#library(randomForest, lib.loc = "/usr/local/R-4.0.5/lib64/R/library")
-#library(pROC, lib.loc = "/usr/local/R-4.0.5/lib64/R/library")
-######################### 01.parameters ##############################
-rm(list=ls())
-if (TRUE){
-  option_list <- list(
-    make_option(c("-i", "--input"),     type="character", default="genus.xls",help="input"),
-    make_option(c("-w", "--wilcox"),    type="character", default="none", help="wilcox test"),
-    make_option(c(      "--select"),    type="character", default="select.list", help="select.list"),
-    make_option(c("-m", "--map"),       type="character", default="map-group.txt",help="group"),
-    make_option(c("-n", "--cvnumber"),  type="numeric",   default=5,help="x fold"),
-    make_option(c("-t", "--cvtime"),    type="numeric",   default=5, help="x times"),
-    make_option(c("-p", "--per"),       type="numeric",   default=0,help="OTU filter"),
-    make_option(c("-k", "--markernum"), type="numeric",   default=0,help="pick"),
-    make_option(c("-f", "--feature"),   type="character", default="none", help="feature_importance_scores.txt"),
-    make_option(c("-c", "--color"),     type="character", default="none",help="color"),
-    make_option(c("-s", "--seed"),      type="character", default="1234", help="seed 1234"),
-    make_option(c("-x", "--Meande"),    type="double",    default=0.001, help="feature_importance_scores threshold"),
-    make_option(c("-y", "--pvalue"),    type="double",    default=0.05, help="pvalue"),
-    make_option(c("-z", "--qvalue"),    type="double",    default=1,  help="qvalue"),
-    make_option(c(      "--value"),     type="numeric",   default=0, help="core_microbiome"),
-    make_option(c(      "--part"),      type="character", default="2/3", help="split 2/3 or 3/4 or 0.8"),
-    make_option(c(      "--nnew"),      type="logical",   default=T, help="split.map-group.txt"),
-    make_option(c("-v", "--valid"),     type="character", default="none", help="valid.rarefac.otu_table.xls"),
-    make_option(c("-g", "--gp"),        type="character", default="none", help="map2.txt"),
-    make_option(c("-r", "--paired"),    type="logical",   default=FALSE, help="paireded testï¼Ÿï¼Ÿï¼Ÿ")
-  )
-  opts <- parse_args(OptionParser(option_list=option_list))
-}
-
-i <- opts$input
-w <- opts$wilcox
-m <- opts$map
-cvn <- opts$cvnumber
-cvt <- opts$cvtime
-p <- opts$per
-f <- opts$feature
-c <- opts$color
-marker.num <- opts$markernum
-
-options(scipen = 200)
-set.seed(opts$seed) # set.seed(2345) # set.seed(3456)
-
-######################### 02.function ##############################
-my.rfcv <- function (trainx, trainy, cv.fold = 5, scale = "log", step = 0.5, 
-                     mtry = function(p) max(1, floor(sqrt(p))), recursive = FALSE, ...) 
-{
-  classRF <- is.factor(trainy)
-  n <- nrow(trainx)
-  p <- ncol(trainx)
-  if (scale == "log") {
-    k <- floor(log(p, base = 1/step))
-    n.var <- round(p * step^(0:(k - 1)))
-    same <- diff(n.var) == 0
-    if (any(same)) 
-      n.var <- n.var[-which(same)]
-    if (!1 %in% n.var) 
-      n.var <- c(n.var, 1)
-    print(n.var)
-  }
-  else {
-    n.var <- seq(from = p, to = 1, by = step)
-  }
-  k <- length(n.var)
-  cv.pred <- vector(k, mode = "list")
-  for (i in 1:k) cv.pred[[i]] <- trainy
-  if (classRF) {
-    f <- trainy
-  }
-  else {
-    f <- factor(rep(1:5, length = length(trainy))[order(order(trainy))])
-  }
-  nlvl <- table(f)
-  idx <- numeric(n)
-  for (i in 1:length(nlvl)) {
-    idx[which(f == levels(f)[i])] <- sample(rep(1:cv.fold, length = nlvl[i]))
-  }
-  
-  res = list() 
-  
-  for (i in 1:cv.fold) {
-    all.rf <- randomForest(trainx[idx != i, , drop = FALSE], 
-                           trainy[idx != i], trainx[idx == i, , drop = FALSE], 
-                           trainy[idx == i], mtry = mtry(p), importance = TRUE, ...)
-    cv.pred[[1]][idx == i] <- all.rf$test$predicted
-    #impvar <- (1:p)[order(all.rf$importance[, 1], decreasing = TRUE)]
-    impvar <- (1:p)[order(randomForest::importance(all.rf, type = 1), decreasing = TRUE)]
-    res[[i]] <- impvar
-    for (j in 2:k) {
-      imp.idx <- impvar[1:n.var[j]]
-      sub.rf <- randomForest(trainx[idx != i, imp.idx, 
-                                    drop = FALSE], trainy[idx != i], trainx[idx == i, imp.idx, drop = FALSE],
-                             trainy[idx == i], mtry = mtry(n.var[j]), importance = recursive, ...)
-      cv.pred[[j]][idx == i] <- sub.rf$test$predicted
-      if (recursive) {
-        #impvar <- (1:length(imp.idx))[order(sub.rf$importance[, 1], decreasing = TRUE)]
-        impvar <- (1:length(imp.idx))[order(randomForest::importance(sub.rf, type = 1), decreasing = TRUE)]
-      }
-      NULL
-    }
-    NULL
-  }
-  if (classRF) {
-    error.cv <- sapply(cv.pred, function(x) mean(trainy != x))
-  }
-  else {
-    error.cv <- sapply(cv.pred, function(x) mean((trainy - x)^2))
-  }
-  names(error.cv) <- names(cv.pred) <- n.var
-  list(n.var = n.var, error.cv = error.cv, predicted = cv.pred, res = res)
-}
-
-Minus <- function(x,n){
-  d1 <- 10^(-n)
-  ifelse(x >= d1,round(x,4),paste0("< ",d1))
-}
-
-Genus_threshold <- function(nc,otu_coverage,data2_1){
-  genus_threshold <- enframe(sapply(1:length(nc),function(y) 
-    sum(as.numeric(otu_coverage >= nc[y])))) %>% 
-    mutate(remian = length(otu_coverage) - value,
-           coverage = nc) %>%
-    mutate(per = sapply(1:length(nc),function(o){
-      sum(unlist(data2_1[otu_coverage >= .$coverage[o],1:(ncol(data2_1))])) / 
-        sum(unlist(data2_1[,1:(ncol(data2_1))]))
-    })) %>% dplyr::select(-name)
-}
-
-if (file.exists("projectimage.RData")){
-
-  load(file = "projectimage.RData")
-  
-}else{
-  data1 <- read.table(m,head= T ,sep="\t",comment.char = "",fileEncoding = "UTF-8")
-  colnames(data1) <- c("SampleID","group")
-  
-  data2 <- read.table(i,head= T ,sep="\t",comment.char = "",row.names = 1,fileEncoding = "UTF-8")
-  
-  data2_1 <- data2[,as.character(data1$SampleID)]
-  data2_1 <- sapply(1:ncol(data2_1),function(x) data2_1[,x] <- data2_1[,x]/sum(data2_1[,x]))
-  rownames(data2_1) <- rownames(data2)
-  colnames(data2_1) <- data1$SampleID
-  
-  otu_coverage <- apply(data2_1[,1:ncol(data2_1)],1,function(x) #20221212
-    length(x[x>0])/ncol(data2_1))
-  nc <- sort(unique(otu_coverage))
-  
-  Genus_threshold(nc,otu_coverage,data2_1)
-  data2_1 <- data2_1[otu_coverage >= opts$value,] #20221212
-  
-  d2p <- sapply(1:nrow(data2_1),function(y) any(data2_1[y,]>=p))
-  data2_2 <- data2_1[d2p,]
-  
-  if(opts$wilcox != "none"){
-    data3 <- read.table(w,head= T ,sep="\t",comment.char = "",row.names = 1,fileEncoding = "UTF-8")
-    d3p <- rownames(data3)[data3$p.value <= opts$pvalue]
-    data2_3 <- data2_2[rownames(data2_2) %in% d3p,]
-    
-    if (opts$qvalue != 0){
-      d3q <- rownames(data3)[data3$q.value <= opts$qvalue]
-      data2_3 <- data2_3[rownames(data2_3) %in% d3q,]
-    }
-    Data <- cbind(t(data2_3),data1)
-  }
-  
-  if (f != "none"){
-    data4 <- read.table(f,head= T ,sep="\t",comment.char = "",row.names = 1,fileEncoding = "UTF-8")
-    data4 <- data4[data4$Mean_decrease_in_accuracy >= opts$Meande,]
-    data2_4 <- sapply(rownames(data2_3),function(x) strsplit(x," ", fixed=TRUE)[[1]][1])
-    data2_5 <- data2_3[data2_4 %in% rownames(data4),]
-    nrow(data2_5)
-    Data <- cbind(t(data2_5),data1)
-  }
-  
-  if(opts$select != "none"){ #20221221
-    data5 <- read_tsv(opts$select,col_names = F)
-    data2_6 <- data2_2[as.character(data5 %>% t),]
-    Data <- cbind(t(data2_6),data1)
-  }
-  
-  Data <- Data[,-(ncol(Data)-1)]
-  
-  if (c != "none"){
-    sc <- read.table(c,sep="\t",comment.char = "",check.names = FALSE)
-    sc <- sc[which(sc[,1] %in% unique(Data$group)),]
-    mycol <- as.vector(sc[,2])
-    Data$group <- factor(Data$group,levels=as.vector(sc[,1]))
-  }else{
-    Data$group <- factor(Data$group,levels=unique(as.vector(Data$group)))
-  }
-  Data <- dplyr::arrange(Data,group)
-  
-  ######################### 04.marker ##############################
-  if(opts$nnew){ #20221212
-    if (!opts$paired){
-      if(grepl("/",opts$part)){ #20230109
-        aa <- strsplit(opts$part,'/')[[1]][1] %>% as.numeric ; bb <- strsplit(opts$part,'/')[[1]][2] %>% as.numeric 
-      }else{
-        aa <- strsplit(MASS::fractions(opts$part %>% as.numeric) %>% as.character,'/')[[1]][1] %>% as.numeric 
-        bb <- strsplit(MASS::fractions(opts$part %>% as.numeric) %>% as.character,'/')[[1]][2] %>% as.numeric 
-      }
-      #ind <- table(sample(2,nrow(Data),replace = TRUE,prob = c(0.67,0.33)))
-      SPLIT <- function(DD){# DD <- Data
-        set.seed(opts$seed)
-        ind1 <- sample(1:nrow(DD),round(nrow(DD)*aa/bb),replace=FALSE,prob=1:nrow(DD))
-        ind2 <- setdiff(1:nrow(DD),ind1)
-        bind_rows(ind1 %>% as_tibble() %>% mutate(Split=1),ind2 %>% as_tibble() %>% mutate(Split=2)) %>% arrange(value) %>% pull(Split)
-      }
-      zz <- data1 %>% as_tibble() %>% group_by(group) %>% nest
-      ind <- lapply(1:nrow(zz),function(x) SPLIT(zz$data[[x]]) %>% as_tibble()) %>% unlist() %>% unname()
-    }else{
-      ind <- rep(sample(2,nrow(Data)/2,replace = TRUE,prob = c(0.67,0.33)),2)
-    }
-    if(opts$part!="1/1"){data1 %>% mutate(Split = ind) %>% write_tsv("split.map-group.txt")}
-  }else{
-    ind <-read_tsv("split.map-group.txt",col_select = 3) %>% t %>% as.vector
-  }
-  
-  # 2/3 best marker
-  result <- replicate(cvt, my.rfcv(Data[ind==1,-ncol(Data),drop=FALSE], Data[ind==1,"group"],cv.fold = cvn,step=0.5), simplify=FALSE)
-  error.cv <- sapply(result, "[[", "error.cv")
-  
-  error.cv.rm <- rowMeans(error.cv)
-  id <- error.cv.rm < min(error.cv.rm) + sd(error.cv.rm)
-  error.cv[id, ]
-  if (marker.num == 0) { 
-    marker.num <- min(as.numeric(names(error.cv.rm)[id]))
-  }
-  
-  prefix <- paste(unique(as.vector(data1$group)),collapse = "-")
-  pdf.dir1=paste0(prefix, "_vars.pdf")
-  pdf.dir2=paste0(prefix, "_train_boxplot.pdf") 
-  pdf.dir3=paste0(prefix, "_train_roc.pdf")
-  if(!(opts$part=="1/1" & opts$valid=="none")){
-    pdf.dir4=paste0(prefix, "_test_boxplot.pdf") 
-    pdf.dir5=paste0(prefix, "_test_roc.pdf")
-  }
-  
-  pdf(pdf.dir1) 
-  matplot(result[[1]]$n.var, error.cv, type = "l", log = "x", col = rep(1, cvt),
-          xlab = "Number of vars",  
-          ylab = "CV Error", lty = 1) 
-  lines(result[[1]]$n.var, error.cv.rm, lwd = 2)
-  text(x = marker.num,y = min(error.cv),labels = marker.num,adj = c(1, 0.5),cex = 1.2, xpd = TRUE, font = 2, col = "pink")
-  abline(v = marker.num, col = "pink", lwd = 2)
-  dev.off()
-  
-  # pick marker by corossvalidation 
-  marker.t <- table(unlist(lapply(result, function(x) { 
-    lapply(x$res, "[", 1:marker.num) 
-  }))) 
-  marker.t <- sort(marker.t, d = T) 
-  names(marker.t) <- colnames(Data)[as.numeric(names(marker.t))] 
-  marker.dir <- paste0(prefix, "_marker.txt") 
-  write.table(marker.t, marker.dir, col.names = F, sep = "\t", quote = F) 
-  marker.p <- names(marker.t)[1:marker.num] 
-  
-  # 2/3 for train
-  set.seed(0) # set.seed(10) # set.seed(100)
-  train.rf=randomForest(Data[ind==1,marker.p,drop=FALSE],Data[ind==1,"group"],ntree=1000,proximity=TRUE,importance=TRUE)
-  train.p <- predict(train.rf, type = "prob")
-  pdf(pdf.dir2)
-  if (c != "none"){
-    boxplot(train.p[, 2] ~ Data[ind==1,"group"], col = mycol, main = "Probability", 
-            names = levels(Data[,"group"]), xlab = "Groups", ylab = "POD")
-  }else{
-    boxplot(train.p[, 2] ~ Data[ind==1,"group"], col = 3:2, main = "Probability", 
-            names = levels(Data[,"group"]), xlab = "Groups", ylab = "POD") 
-  }
-  dev.off() 
-  pr.dir <- paste0(prefix, "_train_probability.txt") 
-  write.table(train.p[, 2], pr.dir, sep = "\t", quote = F, col.names = F)
-  
-  # varImPlot::MeanDecreaseAccuracy(å¹³å‡å‡å°‘åº¦ï¼‰,å³æ²¡æœ‰è¿™ä¸ªFeatureï¼Œåˆ†ç±»å‡†ç¡®åº¦ä¸‹é™çš„ç¨‹åº¦ï¼Œç›¸å½“äºŽå¸¸ç”¨çš„åˆ†ç±»è´¡çŒ®åº¦çš„æ¦‚å¿µã€‚
-  #pdf(prefix, "_train_varImPlot.pdf")
-  #varImpPlot(train.rf)
-  #dev.off()
-  
-  if (length(marker.p) > 1){
-    bbtheme <- function(){
-      return(theme_bw() + 
-               theme(plot.title=element_text(size=rel(1),hjust=0.5),
-                     plot.margin = unit(c(1, 1, 1, 1), "lines"),
-                     panel.grid.major=element_line(color="white"),
-                     panel.grid.minor=element_line(color="white"),
-                     axis.title=element_text(size=rel(1))#,
-                     #axis.text.x=element_text(angle=30,hjust =1),
-                     #legend.title=element_blank(),
-                     #legend.text = element_text(size = 6),
-                     #legend.key.size = unit(.4,'cm'),
-                     #legend.spacing.x = unit(0.1, 'cm')
-               ))
-    }
-    
-    GGplot <- function(x,yb){
-      ggplot(x,aes(x=OTU_genus,y=ID)) +
-        geom_point(size=3,color="#FF4500") +
-        #geom_segment(aes(x=OTU_genus,xend=OTU_genus,y=0,yend=MeanDecreaseAccuracy))+
-        #bbtheme() + #geom_line() +
-        theme_bw() +
-        coord_flip() + xlab('') + ylab(yb) +
-        theme(panel.grid.major.x = element_blank(),
-              panel.grid.minor.x = element_blank(),
-              panel.grid.major.y = element_line(colour="grey60", linetype="dashed"),
-              axis.text.y = element_text(hjust = 0))
-    }
-    
-    WHat <- varImpPlot(train.rf) %>% as.data.frame %>% 
-      rownames_to_column() %>% as_tibble %>%
-      rename_at(1,~"OTU_genus") %>% #rename(OTU_genus = colnames(.)[1]) %>%
-      gather(value,ID,-OTU_genus) %>%
-      group_by(value) %>% nest %>% 
-      mutate(data = map(data,function(x) 
-        x %>% arrange(ID) %>%
-          mutate(OTU_genus = fct_inorder(OTU_genus))))
-    
-    Pt <- map(seq_along(WHat),function(x) GGplot(WHat$data[[x]],WHat$value[[x]]))
-    
-    ggsave(str_c(prefix,"_varImpPlot.pdf"),Pt[[1]] + Pt[[2]],
-           width = 12,
-           height = log2(nrow(WHat$data[[1]]))*1.2+3
-    )
-  }
-  
-  Data %>% dplyr::select(-group) %>% rownames_to_column() %>% rename_at(1,~"SampleID") %>% #20230110
-    gather(OTUID,value,-SampleID) %>%
-    mutate_if(is.character,~fct_inorder(.x)) %>%
-    spread(SampleID,value) %>%
-    rename_at(1,~"OTU ID") %>% #rename(`OTU ID` = colnames(.)[1]) %>%
-    filter(`OTU ID` %in% marker.p) %>%
-    write_tsv(str_c("marker.p.",opts$input))
-  
-  # train ROC
-  pdf(pdf.dir3) 
-  roc <- roc(Data[ind==1,"group"],train.p[, 2],plot=T,col="black",ci=F,auc.polygon=F,print.thres=F,print.auc=F,percent=F,xlab="Specificity(%)",ylab="Sensitivity(%)")
-  
-  U <- wilcox.test(train.p[Data[ind==1,"group"] %in% levels(Data[ind==1,"group"])[1],2],
-                   train.p[Data[ind==1,"group"] %in% levels(Data[ind==1,"group"])[2],2])
-  U %>% tidy %>% write.csv(file = "wilcox.train.ROC.txt")
-  
-  sens.ci <- ci.se(roc)
-  plot(sens.ci, type="s", col="lightblue",border="white")
-
-  legend("bottomright",bty="n",paste0("AUC: ",round(ci(roc)[2],4),"\n","95% CI: ",round(ci(roc)[1],4),"-",round(ci(roc)[3],4),"\n","p-value: ",Minus(U$p.value,4),"\n"," "))
-  tt <- paste0(round(coords(roc,"best")[1,1],4),"\n","(",round(coords(roc,"best")[1,2],4),",",round(coords(roc,"best")[1,3],4),")")
-  points(coords(roc,"best")[1,2],coords(roc,"best")[1,3],pch=16,col="red",cex=1.5,font=1)
-  text(coords(roc,"best")[1,2]-0.1,coords(roc,"best")[1,3]-0.1,tt,cex=1.5,pos=4,col="black")
-  dev.off()
-  aoteman_train_AUC<-round(ci(roc)[2],4)
-  aoteman_train_pvalue<-Minus(U$p.value,4)
-
-
-
-  save.image(file = "projectimage.RData")
-}
-
-if (opts$part!="1/1" & opts$gp == "none"){
-  # test predict 
-  # 1/3
-  test.p <- predict(train.rf, Data[ind==2,-ncol(Data)], type = "prob") 
-  pr.dir <- paste0(prefix, "_test_probability.txt") 
-  write.table(test.p[,2], pr.dir, sep = "\t", quote = F, col.names = F)
-  #test.result=cbind(Data[ind==2,"group"],test.p[,2]) 
-  #write.table(test.result, pr.dir, sep = "\t", quote = F, col.names = F)
-  
-  pdf(pdf.dir4) 
-  if (c != "none"){
-    boxplot(test.p[, 2] ~ Data[ind==2,"group"], col = mycol, main = "Probability", 
-            names = levels(Data[,"group"]), xlab = "Groups", ylab = "POD")
-  }else{
-    boxplot(test.p[, 2] ~ Data[ind==2,"group"], col = 3:2, main = "Probability", 
-            names = levels(Data[,"group"]), xlab = "Groups", ylab = "POD") 
-  }
-  dev.off() 
-  
-  # test ROC 
-  pdf(pdf.dir5)
-  roc <- roc(Data[ind==2,"group"],test.p[, 2],plot=T,col="black",ci=F,auc.polygon=F,print.thres=F,print.auc=F,percent=F,xlab="Specificity(%)",ylab="Sensitivity(%)")
-  
-  U <- wilcox.test(test.p[Data[ind==2,"group"] %in% levels(Data[ind==2,"group"])[1],2],
-                   test.p[Data[ind==2,"group"] %in% levels(Data[ind==2,"group"])[2],2])
-  U %>% tidy %>% write.csv(file = "wilcox.test.ROC.txt")
-  
-  sens.ci <- ci.se(roc)
-  plot(sens.ci, type="s", col="lightblue",border="white")
-  legend("bottomright",bty="n",paste0("AUC: ",round(ci(roc)[2],4),"\n","95% CI: ",round(ci(roc)[1],4),"-",round(ci(roc)[3],4),"\n","p-value: ",Minus(U$p.value,4),"\n"," "))
-  tt <- paste0(round(coords(roc,"best")[1,1],4),"\n","(",round(coords(roc,"best")[1,2],4),",",round(coords(roc,"best")[1,3],4),")")
-  points(coords(roc,"best")[1,2],coords(roc,"best")[1,3],pch=16,col="red",cex=1.5,font=1)
-  text(coords(roc,"best")[1,2]-0.1,coords(roc,"best")[1,3]-0.1,tt,cex=1.5,pos=4,col="black")
-  dev.off()
-  
-  Data[ind==2,] %>% dplyr::select(-group) %>% rownames_to_column() %>% rename_at(1,~"SampleID") %>%
-    gather(OTUID,value,-SampleID) %>%
-    mutate_if(is.character,~fct_inorder(.x)) %>%
-    spread(SampleID,value) %>%
-    rename_at(1,~"OTU ID") %>% #rename(`OTU ID` = colnames(.)[1]) %>%
-    filter(`OTU ID` %in% marker.p) %>%
-    write_tsv(str_c("marker.p.test.",opts$input))
-  
-}else if(opts$gp != "none"){
-  testgp <- read_tsv(opts$gp) %>% 
-    rename_all(~c("SampleID","group")) %>% #rename(SampleID = colnames(.)[1],group = colnames(.)[2]) %>%
-    mutate(group = factor(group,levels=unique(data1$group)))
-  
-  testo <- marker.p %>% enframe %>% 
-    mutate(backup = value) %>%
-    separate(backup,into = c("SampleID","genus"),sep = " ") %>%
-    .[,c("SampleID","genus")]
-  
-  test <- read_tsv(opts$valid) %>% 
-    rename_at(1,~"SampleID") %>% #rename("SampleID" = colnames(.)[1]) %>%
-    .[,c("SampleID",as.vector(testgp$SampleID))] %>% 
-    mutate_at(vars(2:ncol(.)),function(x) x/sum(x)) %>%
-    mutate(SampleID = map_chr(SampleID,~str_split(.x," ")[[1]][1])) %>%
-    right_join(testo) %>% 
-    replace(., is.na(.), 0) %>% 
-    mutate(SampleID = str_c(SampleID,genus,sep = " ")) %>%
-    mutate(SampleID = factor(SampleID, 
-                             levels=unique(SampleID))) %>%
-    dplyr::select(-genus) %>%
-    gather(var, value, -SampleID) %>% 
-    mutate(var = factor(var,levels=unique(var))) %>%
-    spread(SampleID, value) %>% 
-    rename_at(1,~"SampleID") %>% #rename(SampleID = var) %>%
-    right_join(.,testgp)
-  
-  test$group <- factor(test$group,levels = levels(Data$group))
-  write_tsv(test %>% dplyr::select(-group),"test_output.xls")
-  cc <- test$SampleID
-  Test <- test %>% as.data.frame %>% .[,-1]
-  rownames(Test) <- cc
-  
-  # test predict 
-  # 1/3
-  if(ncol(Test)!=2){ 
-    test.p <- predict(train.rf, Test[,-ncol(Test)], type = "prob")
-    pr.dir <- paste0(prefix, "_test_probability.txt") 
-    write.table(test.p[,2], pr.dir, sep = "\t", quote = F, col.names = F)
-  }else{
-    TTest <- data.frame(Test[,-ncol(Test)])
-    rownames(TTest) <- rownames(Test)
-    colnames(TTest) <- colnames(Test)[1]
-    test.p <- predict(train.rf, TTest , type = "prob")
-    pr.dir <- paste0(prefix, "_test_probability.txt") 
-    write.table(test.p[,2], pr.dir, sep = "\t", quote = F, col.names = F)
-  }
-  
-  pdf(pdf.dir4) 
-  if (c != "none"){
-    boxplot(test.p[, 2] ~ Test[,"group"], col = mycol, main = "Probability", 
-            names = levels(Data[,"group"]), xlab = "Groups", ylab = "POD")
-  }else{
-    boxplot(test.p[, 2] ~ Test[,"group"], col = 3:2, main = "Probability", 
-            names = levels(Data[,"group"]), xlab = "Groups", ylab = "POD") 
-  }
-  dev.off() 
-  
-  # test ROC 
-  pdf(pdf.dir5)
-  roc <- roc(Test[,"group"],test.p[, 2],plot=T,col="black",ci=F,auc.polygon=F,
-             print.thres=F,print.auc=F,percent=F,xlab="Specificity(%)",ylab="Sensitivity(%)")
-  
-  U <- wilcox.test(test.p[Test[,"group"] %in% levels(Test[,"group"])[1],2],
-                   test.p[Test[,"group"] %in% levels(Test[,"group"])[2],2])
-  U %>% tidy %>% write.csv(file = "wilcox.test.ROC.txt")
-  
-  sens.ci <- ci.se(roc)
-  plot(sens.ci, type="s", col="lightblue",border="white")
-  # æ ‡æ³¨
-  legend("bottomright",bty="n",paste0("AUC: ",round(ci(roc)[2],4),"\n","95% CI: ",round(ci(roc)[1],4),"-",round(ci(roc)[3],4),"\n","p-value: ",Minus(U$p.value,4),"\n"," "))
-  tt <- paste0(round(coords(roc,"best")[1,1],4),"\n","(",round(coords(roc,"best")[1,2],4),",",round(coords(roc,"best")[1,3],4),")")
-  points(coords(roc,"best")[1,2],coords(roc,"best")[1,3],pch=16,col="red",cex=1.5,font=1)
-  text(coords(roc,"best")[1,2]-0.1,coords(roc,"best")[1,3]-0.1,tt,cex=1.5,pos=4,col="black")
-  
-  dev.off()
-  
-  test %>% dplyr::select(-group) %>% gather(OTUID,value,-SampleID) %>%
-    mutate_if(is.character,~fct_inorder(.x)) %>%
-    spread(SampleID,value) %>%
-    rename_at(1,~"OTU ID") %>% #rename(`OTU ID` = colnames(.)[1]) %>%
-    filter(`OTU ID` %in% marker.p) %>%
-    write_tsv(str_c("marker.p.",opts$valid))
-}
-
-if(!(opts$part=="1/1" & opts$valid=="none")){
-  aoteman_test_AUC<-round(ci(roc)[2],4)
-  aoteman_test_pvalue<-Minus(U$p.value,4)
-}else{
-  aoteman_test_AUC<-NA
-  aoteman_test_pvalue<-NA
-}
-   
-##################################################################################################
-write_tsv(opts %>% as.matrix %>% as.data.frame %>% rownames_to_column() %>% 
-            as_tibble %>% mutate(V1 = as.character(V1)),
-          str_c("Parameter",
-                str_replace_all(as.character(date())," ","_") %>% str_replace_all(":","_"),
-                ".xls"),
-          col_names = FALSE)
-
-if(!file.exists("Parameter.xls")){
-  newopts<-opts %>% as.matrix %>% as.data.frame %>% rownames_to_column() %>% 
-    as_tibble %>% mutate(V1 = as.character(V1)) %>% rbind(c("train_AUC",aoteman_train_AUC),c("train_pvalue",aoteman_train_pvalue),c("test_AUC",aoteman_test_AUC),c("test_pvalue",aoteman_test_pvalue),c("marker.num",marker.num),c("Rscript","rfcv_subsample.R"))
-  
-  write_tsv(newopts %>% as.matrix %>% as.data.frame %>% 
-              as_tibble %>% mutate(V1 = as.character(V1)),
-            str_c("Parameter", ".xls"),
-            col_names = FALSE)
-}else{
-  oldopts<-read_tsv("Parameter.xls",col_names = F)
-  
-  newopts<-opts %>% as.matrix %>% as.data.frame %>% rownames_to_column() %>% 
-    as_tibble %>% mutate(V1 = as.character(V1)) %>% rbind(c("train_AUC",aoteman_train_AUC),c("train_pvalue",aoteman_train_pvalue),c("test_AUC",aoteman_test_AUC),c("test_pvalue",aoteman_test_pvalue),c("marker.num",marker.num),c("Rscript","rfcv_subsample.R"))
-  
-  nnewopts<-cbind(oldopts,newopts[,2])
-  write_tsv(nnewopts %>% as.matrix %>% as.data.frame %>% 
-              as_tibble %>% mutate(V1 = as.character(V1)),
-            str_c("Parameter", ".xls"),
-            col_names = FALSE)
-}
-
-```
-# Part.5 xgboost-SHAP
-```
+## Part6.XGB-sharp
+```markdown
 # XGBoost-SHAP 微生物组年龄预测分析脚本说明
 
 ## 简介
@@ -1912,74 +2101,4 @@ if(!file.exists("Parameter.xls")){
 ### 基本运行
 ```bash
 python xgb-shap251216.py
-```
-
-### 控制参数
-脚本顶部的全局配置可以调整：
-- `TRAIN_MODEL = False` - 设置为True重新训练模型，False使用已保存模型
-- `RANDOM_STATE = 42` - 随机种子，确保结果可重现
-
-### 特殊分析功能
-
-#### 1. 年龄组特异性分析
-脚本会自动按年龄段分组，分析不同年龄组的微生物特征贡献差异：
-- 5岁年龄段分组（2-7岁, 8-12岁, ...）
-- 生成各年龄组的聚合SHAP值
-- 创建年龄组间对比热力图
-
-#### 2. 自定义特征分析
-可通过创建以下文件来指定要分析的特征：
-- `select.txt` - 指定要重点分析的特征列表
-- `select1.txt` 和 `select2.txt` - 指定要分析特征交互关系的两组特征
-
-#### 3. 特定样本分析
-创建 `select_sample.txt` 文件列出要单独分析的样本名，脚本会为这些样本生成详细的SHAP解释图。
-
-## 技术细节
-
-### 模型架构
-采用Pipeline设计模式，包含两个主要步骤：
-1. 特征选择：使用XGBoost作为评估器的递归特征消除（RFE）
-2. 回归预测：XGBoost回归器
-
-### 超参数优化空间
-- n_estimators: [100, 200, 300]
-- max_depth: [3, 5, 7]
-- learning_rate: [0.01, 0.05, 0.1]
-- subsample: [0.8, 0.9, 1.0]
-- colsample_bytree: [0.8, 0.9, 1.0]
-- reg_alpha: [0, 0.1, 0.5]
-- reg_lambda: [0.1, 1, 2]
-
-### 交叉验证策略
-- 外层：5折交叉验证
-- 内层：5折交叉验证用于超参数优化
-- 使用随机搜索迭代50次寻找最优参数组合
-
-## 注意事项
-
-1. 确保输入文件格式正确，特别是列名和数据类型
-2. 脚本会自动创建输出目录结构，无需手动创建
-3. 首次运行建议设置 `TRAIN_MODEL = True` 进行模型训练
-4. 大量可视化图表生成可能需要较长时间
-5. SHAP分析对于特征较多的数据集计算量较大
-
-## 依赖库
-
-- pandas
-- numpy
-- scikit-learn
-- xgboost
-- shap
-- matplotlib
-- seaborn
-
-## 最终模型性能
-
-根据输出结果显示，最终模型使用了1211个特征，主要的超参数配置为：
-- n_estimators: 300
-- max_depth: 5
-- learning_rate: 0.05
-- subsample: 0.9
-- colsample_bytree: 0.9
 ```
