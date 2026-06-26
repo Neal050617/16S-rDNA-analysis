@@ -525,7 +525,7 @@ if (TRUE) {
     
     #maaslin3内部参数
     make_option(c("-o", "--output"),           type = "character", default = "./",                  help = "输出文件夹名"),
-    make_option(c("--formula"),                type = "character", default = "~ age + gender + region + age:gender + age:region",                  help = "输出文件夹名"),
+    make_option(c("--formula"),                type = "character", default = "~ age + sex + area + urban_rural + birth mode + education level + marital status + denture use + antihypertensive treatment",                  help = "输出文件夹名"),
     #make_option(c("--fixed_effects"),          type = "character", default = c("age", "gender", "region"),   help = "固定效应"),
     make_option(c("--reference"),              type = "character", default = c("gender,F","region,central"),            help = "对照组 组名+对照组"),
     make_option(c("--min_abundance"),          type = "double",    default = 0,                  help = "校正后的q值小于"),
